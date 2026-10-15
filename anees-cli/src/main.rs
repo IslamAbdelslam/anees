@@ -2,6 +2,7 @@
 
 use anees_core::{
     AneesError, Result, IpcClient, StdioTransport, IpcMessage, ProgressNotification, LogNotification,
+    Request,
 };
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -146,32 +147,42 @@ async fn main() -> Result<()> {
 
     let client = Arc::new(Mutex::new(IpcClient::new(tx, notif_tx)));
 
-    // Create transport with child process pipes: stdout (AsyncRead) as reader, stdin (AsyncWrite) as writer
-    let transport = Arc::new(Mutex::new(StdioTransport::new(stdout, stdin)));
+    // Create transport with child process pipes, then split into
+    // independently-owned halves so the reader task never holds a lock
+    // across `read_buf().await` while the writer needs to send.
+    let transport = StdioTransport::new(stdout, stdin);
+    let (mut reader, writer) = transport.split();
+    let writer = Arc::new(Mutex::new(writer));
 
-    let transport_clone = transport.clone();
+    let writer_clone = writer.clone();
 
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if let Err(e) = transport_clone.lock().await.send(&msg).await {
+            if let Err(e) = writer_clone.lock().await.send(&msg).await {
                 tracing::error!("Failed to send IPC message: {}", e);
                 break;
             }
         }
     });
 
-    // Spawn transport reader
+    // Spawn transport reader (exclusive ownership, no shared lock)
     let client_clone = client.clone();
-    let transport_clone = transport.clone();
 
     tokio::spawn(async move {
-        while let Ok(Some(msg)) = transport_clone.lock().await.receive().await {
+        while let Ok(Some(msg)) = reader.receive().await {
             match msg {
                 IpcMessage::Response(resp) => {
                     client_clone.lock().await.handle_response(resp).await;
                 }
                 IpcMessage::Notification(notif) => {
                     client_clone.lock().await.handle_notification(notif).await;
+                }
+                IpcMessage::Request(Request::Notification { method, params, .. }) => {
+                    client_clone.lock().await.handle_notification(anees_core::Notification {
+                        jsonrpc: "2.0".to_string(),
+                        method,
+                        params,
+                    }).await;
                 }
                 _ => {}
             }

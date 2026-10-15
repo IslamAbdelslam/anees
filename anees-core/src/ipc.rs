@@ -56,6 +56,7 @@ pub struct RpcError {
 
 /// JSON-RPC Notification (server → client)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Notification {
     pub jsonrpc: String,
     pub method: String,
@@ -63,12 +64,17 @@ pub struct Notification {
 }
 
 /// IPC message types
+///
+/// NOTE: Untagged (not internally tagged) so wire format stays compatible
+/// with standard JSON-RPC 2.0 (`{"jsonrpc":"2.0",...}` without a `type`
+/// discriminator). A tagged enum would require a `type` field that Python
+/// never sends, making every response fail to deserialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(untagged)]
 pub enum IpcMessage {
-    Request(Request),
     Response(Response),
     Notification(Notification),
+    Request(Request),
 }
 
 /// Protocol methods
@@ -197,6 +203,67 @@ pub trait IpcServer: Send + Sync {
     fn handle_request(&self, request: Request) -> Pin<Box<dyn Future<Output = Response> + Send>>;
 }
 
+/// Split reader half of the stdio transport.
+///
+/// Owning the reader exclusively in one task avoids holding a shared
+/// `Mutex<StdioTransport>` across `read_buf().await`, which would block
+/// the writer task and deadlock on startup (reader waits for a response
+/// while writer waits for the lock).
+pub struct StdioReader<R> {
+    reader: R,
+    buffer: BytesMut,
+}
+
+/// Split writer half of the stdio transport.
+pub struct StdioWriter<W> {
+    writer: W,
+}
+
+impl<R> StdioReader<R>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            buffer: BytesMut::with_capacity(8192),
+        }
+    }
+
+    pub async fn receive(&mut self) -> Result<Option<IpcMessage>> {
+        loop {
+            if let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
+                let line = self.buffer.split_to(pos + 1);
+                let line_str = std::str::from_utf8(&line[..pos])?;
+                if !line_str.trim().is_empty() {
+                    return Ok(Some(serde_json::from_str(line_str)?));
+                }
+            }
+
+            let n = self.reader.read_buf(&mut self.buffer).await?;
+            if n == 0 {
+                return Ok(None); // EOF
+            }
+        }
+    }
+}
+
+impl<W> StdioWriter<W>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    pub fn new(writer: W) -> Self {
+        Self { writer }
+    }
+
+    pub async fn send(&mut self, msg: &IpcMessage) -> Result<()> {
+        let line = serde_json::to_string(msg)? + "\n";
+        self.writer.write_all(line.as_bytes()).await?;
+        self.writer.flush().await?;
+        Ok(())
+    }
+}
+
 /// Stdout/Stdin transport for IPC
 pub struct StdioTransport<R, W> {
     pub reader: R,
@@ -215,6 +282,21 @@ where
             writer,
             buffer: BytesMut::with_capacity(8192),
         }
+    }
+
+    /// Split into independently-owned reader/writer halves.
+    /// Use one half per task to avoid the `Arc<Mutex<_>>` deadlock where
+    /// `receive()` holds the lock across `read_buf().await` and blocks `send()`.
+    pub fn split(self) -> (StdioReader<R>, StdioWriter<W>) {
+        (
+            StdioReader {
+                reader: self.reader,
+                buffer: self.buffer,
+            },
+            StdioWriter {
+                writer: self.writer,
+            },
+        )
     }
 
     pub async fn send(&mut self, msg: &IpcMessage) -> Result<()> {
@@ -303,4 +385,46 @@ pub fn log_notification(level: &str, message: String) -> Result<Notification> {
             context: None,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_without_type_field_deserializes() {
+        // Plain JSON-RPC 2.0 from Python has no `type` discriminator.
+        let raw = r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#;
+        let msg: IpcMessage = serde_json::from_str(raw).expect("response must parse");
+        assert!(matches!(msg, IpcMessage::Response(Response::Success { .. })));
+    }
+
+    #[test]
+    fn request_serializes_without_type_field() {
+        let req = Request::WithId {
+            jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(1),
+            method: "ping".to_string(),
+            params: None,
+        };
+        let s = serde_json::to_string(&IpcMessage::Request(req)).unwrap();
+        assert!(!s.contains("\"type\""), "wire format must stay plain JSON-RPC: {s}");
+    }
+
+    #[tokio::test]
+    async fn split_halves_send_receive_roundtrip() {
+        // Reader and writer halves are independently owned: sending must
+        // not require the reader lock (regression test for startup deadlock).
+        let (a, b) = tokio::io::duplex(8192);
+        let (mut reader, mut writer) = StdioTransport::new(b, a).split();
+        let ping = IpcMessage::Request(Request::WithId {
+            jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(7),
+            method: "ping".to_string(),
+            params: None,
+        });
+        writer.send(&ping).await.unwrap();
+        let got = reader.receive().await.unwrap().expect("one message");
+        assert!(matches!(got, IpcMessage::Request(Request::WithId { .. })));
+    }
 }
