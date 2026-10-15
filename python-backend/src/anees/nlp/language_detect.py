@@ -12,9 +12,24 @@ logger = logging.getLogger("anees.lang")
 
 class LanguageDetector:
     def __init__(self, model_path: Optional[str] = None):
+        # Lazy: do NOT download (126MB) or load the model here, or the
+        # RPC server blocks/crashes on startup when offline. Resolved on
+        # first use via _ensure_loaded(), or proactively via models.ensure.
         self.model = None
-        self.model_path = model_path or self._get_model_path()
-        self._load_model()
+        self.model_path = model_path
+
+    def _ensure_loaded(self) -> bool:
+        """Load model on first use. Returns False (no raise) if unavailable."""
+        if self.model is not None:
+            return True
+        try:
+            path = self.model_path or self._get_model_path()
+            self.model_path = path
+            self._load_model()
+            return self.model is not None
+        except Exception as e:
+            logger.error(f"Language model unavailable (lazy load): {e}")
+            return False
 
     def _get_model_path(self) -> str:
         """Get or download fasttext language detection model"""
@@ -40,6 +55,9 @@ class LanguageDetector:
     def detect(self, text: str) -> LanguageDetection:
         """Detect language of text"""
         if not text.strip():
+            return LanguageDetection(lang="unknown", confidence=0.0)
+
+        if not self._ensure_loaded():
             return LanguageDetection(lang="unknown", confidence=0.0)
 
         # Clean text

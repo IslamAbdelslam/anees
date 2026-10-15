@@ -12,8 +12,20 @@ logger = logging.getLogger("anees.arabic")
 
 class ArabicProcessor:
     def __init__(self):
+        # Lazy: do NOT load camel-tools models in __init__, or the RPC
+        # server blocks/crashes on startup when offline. Loaded on first
+        # use via _ensure_loaded().
         self.disambiguator = None
-        self._load_model()
+
+    def _ensure_loaded(self) -> bool:
+        if self.disambiguator is not None:
+            return True
+        try:
+            self._load_model()
+            return self.disambiguator is not None
+        except Exception as e:
+            logger.error(f"Arabic model unavailable (lazy load): {e}")
+            return False
 
     def _load_model(self):
         """Load camel-tools disambiguator"""
@@ -31,6 +43,9 @@ class ArabicProcessor:
 
         # Normalize
         text = self._normalize(text)
+
+        if not self._ensure_loaded():
+            return TashkeelResult(text_with_diacritics=text, changes=0)
 
         # Tokenize
         tokens = simple_word_tokenize(text)
@@ -52,8 +67,16 @@ class ArabicProcessor:
         else:
             result = self._reconstruct_semantic(disambig, tokens)
 
-        # Count changes
-        changes = sum(1 for a, b in zip(text, result) if a != b and b in '\u064e\u064f\u0650\u0651\u0652')
+        # Count added diacritics: comparing char-by-char with zip() is wrong
+        # because inserting diacritics shifts all subsequent offsets.
+        # Instead count diacritic codepoints added vs. the input.
+        DIACRITICS = set('ًٌٍَُِّْٰٕٖٜٟٓٔٗ٘ٙٚٛٞـً')
+        # Core Arabic vowel marks U+064B–U+0652 plus common extras
+        def _diac_count(s: str) -> int:
+            return sum(1 for c in s if c in DIACRITICS or '\u064b' <= c <= '\u0652')
+
+        changes = _diac_count(result) - _diac_count(text)
+        changes = max(0, changes)
 
         return TashkeelResult(text_with_diacritics=result, changes=changes)
 

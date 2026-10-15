@@ -76,7 +76,7 @@ class VoiceManager:
     def get_voices_by_language(self, lang: str) -> List[VoiceInfo]:
         voices = self.catalog.get(lang, {})
         return [
-            VoiceInfo(id=vid, **info)
+            VoiceInfo(id=vid, language=lang, **info)
             for vid, info in voices.items()
         ]
 

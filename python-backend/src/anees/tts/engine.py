@@ -145,30 +145,3 @@ class TTSEngine:
         """Generate preview audio for voice"""
         preview_text = "مرحباً بكم في أنيس" if lang == "ar" else "Welcome to Anees"
         return self.synthesize(preview_text, lang, voice, 1.0)
-
-
-class VoiceManager:
-    def __init__(self):
-        self.catalog = {
-            "arabic": {
-                "af_msa": {"name": "Modern Standard Arabic (Female)", "gender": "female", "style": "academic", "recommended": True},
-                "am_msa": {"name": "Modern Standard Arabic (Male)", "gender": "male", "style": "academic", "recommended": False},
-            },
-            "english": {
-                "af_bella": {"name": "US English (Female)", "gender": "female", "style": "academic", "recommended": True},
-                "am_michael": {"name": "US English (Male)", "gender": "male", "style": "academic", "recommended": False},
-                "bf_emma": {"name": "UK English (Female)", "gender": "female", "style": "narrative", "recommended": False},
-            },
-            "saudi": {
-                "af_saudi": {"name": "Saudi Arabic (Female)", "gender": "female", "style": "narrative", "recommended": False},
-            }
-        }
-
-    def get_catalog(self) -> Dict:
-        return self.catalog
-
-    def get_voice_info(self, voice_id: str) -> Optional[Dict]:
-        for lang_voices in self.catalog.values():
-            if voice_id in lang_voices:
-                return {"id": voice_id, **lang_voices[voice_id]}
-        return None
