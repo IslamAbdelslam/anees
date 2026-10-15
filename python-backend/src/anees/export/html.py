@@ -2,7 +2,7 @@
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import uuid
 from anees.models import ChunkData, ExportOptions
 import logging

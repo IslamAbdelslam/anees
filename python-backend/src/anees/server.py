@@ -12,9 +12,8 @@ from pydantic import BaseModel
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from anees.pdf.extractor import PDFExtractor
+from anees.pdf.extractor import PDFExtractor, PDFChunker
 from anees.pdf.ocr import OCREngine
-from anees.pdf.chunker import PDFChunker
 from anees.nlp.language_detect import LanguageDetector
 from anees.nlp.arabic import ArabicProcessor
 from anees.tts.engine import TTSEngine
@@ -211,14 +210,14 @@ class AneesRPCServer:
         if not all([job_id, pdf_path]):
             raise ValueError("job_id and pdf_path required")
         job = await self.orchestrator.start_job(job_id, pdf_path, language_mode, voice, output)
-        return job.model_dump()
+        return job.to_dict()
 
     async def job_status(self, params: Dict) -> Dict:
         job_id = params.get("job_id")
         if not job_id:
             raise ValueError("job_id required")
         status = await self.orchestrator.get_status(job_id)
-        return status.model_dump()
+        return status.to_dict()
 
 
 async def main():
