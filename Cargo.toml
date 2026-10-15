@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "anees-core",
+    "anees-gui",
+    "anees-cli",
+]
+
+[workspace.dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full", "macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+thiserror = "1.0"
+bytes = "1.0"
+futures = "0.3"
+uuid = { version = "1.0", features = ["v4", "serde", "fast-rng"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+rfd = "0.12"
+eframe = "0.29"
+egui = "0.29"
+clap = { version = "4.0", features = ["derive"] }
+fastrand = "2.0"
+num_cpus = "1.16"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/IslamAbdelslam/anees"
+authors = ["Islam Abdelslam"]
+description = "Anees - Arabic/English PDF-to-Speech Desktop App"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
