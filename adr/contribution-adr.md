@@ -45,6 +45,22 @@ We adopt the following contribution workflow for all changes to the Anees projec
   - Refactor when duplication hits 3×, not before
 - **Rationale**: Keeps velocity high, reduces cognitive load, minimizes technical debt from unused code.
 
+### 6. Split Large Changes Into Multiple Commits
+- **Rule**: If the code change for an issue exceeds **500 lines** (added + removed, excluding generated files), split it into multiple logical commits within the same PR to make review easier.
+- **Guidelines**:
+  - Each commit must compile and pass tests on its own (no broken intermediate states)
+  - Order commits bottom-up: foundations first, features on top
+  - Use stacked, self-contained commits (e.g., `types` → `logic` → `wiring` → `tests`)
+  - Keep each commit under ~300 lines where possible
+  - Write a clear message per commit explaining the single step it implements
+  - Reference the issue in every commit (`Fixes #<num>` on the final commit is enough; others may use `Refs #<num>`)
+- **Example** (Issue #13, ONNX TTS engine, ~800 lines):
+  1. `feat(tts): add ONNX session loader Refs #13`
+  2. `feat(tts): add phonemizer wrapper Refs #13`
+  3. `feat(tts): add voice embedding manager Refs #13`
+  4. `test(tts): add synthesis integration tests Fixes #13`
+- **Rationale**: Small, reviewable commits let the owner verify each step in isolation, catch bugs earlier, and revert precisely if needed.
+
 ---
 
 ## Workflow Summary
