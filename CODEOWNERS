@@ -1,0 +1,5 @@
+# Code owners for Anees.
+# The owner must review every pull request before merge
+# (enforced by branch protection on `master`).
+
+* @IslamAbdelslam
