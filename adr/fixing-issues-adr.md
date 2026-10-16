@@ -62,6 +62,21 @@ that backs our implementation choices.
 - **Rationale**: Upgrades (e.g. eframe 0.29→0.36 with breaking API changes)
   are their own risk surface and must not ride along with unrelated work.
 
+### Rule 6. Merge, retarget, and branch cleanup
+- **Rule**: A PR merges to `master` only when review-approved **and** CI is
+  green on its exact head commit. After landing:
+  1. Sync `master` and verify the commits are present.
+  2. Retarget any stacked PRs to `master` (this also turns CI on, since
+     the workflow only runs on master-targeted PRs).
+  3. Delete merged branches **only** after `git branch --merged` proves
+     every commit is contained in `master` — and confirm with the
+     maintainer before deleting *remote* branches.
+  4. The PR body must carry `Fixes #N` for **every** issue in its diff
+     (a PR that bundles issues must name and close all of them).
+- **Rationale**: Unmerged stacks silently disable CI and hide scope;
+  unverified deletions risk losing work. The confirmation step exists
+  because remote history is shared (lesson: Oct 2026 cleanup).
+
 ---
 
 ## Tech Notes (researched 2026-10-16)
