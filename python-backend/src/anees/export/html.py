@@ -1,17 +1,19 @@
 """HTML Export for reviewed text"""
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-from pathlib import Path
-from typing import List, Dict, Any, Optional
-import uuid
-from anees.models import ChunkData, ExportOptions
 import logging
+import uuid
+from pathlib import Path
+from typing import Any
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+from anees.models import ChunkData, ExportOptions
 
 logger = logging.getLogger("anees.export.html")
 
 
 class HTMLExporter:
-    def __init__(self, template_dir: Optional[Path] = None):
+    def __init__(self, template_dir: Path | None = None):
         self.template_dir = template_dir or Path(__file__).parent / "templates"
         self.template_dir.mkdir(exist_ok=True)
 
@@ -22,7 +24,7 @@ class HTMLExporter:
 
         self.env = Environment(
             loader=FileSystemLoader(self.template_dir),
-            autoescape=select_autoescape(['html', 'xml']),
+            autoescape=select_autoescape(["html", "xml"]),
             trim_blocks=True,
             lstrip_blocks=True,
         )
@@ -198,36 +200,36 @@ class HTMLExporter:
     </script>
 </body>
 </html>"""
-        path.write_text(template, encoding='utf-8')
+        path.write_text(template, encoding="utf-8")
 
     def export(
         self,
-        chunks: List[ChunkData],
-        metadata: Dict[str, Any],
-        options: Optional[ExportOptions] = None
+        chunks: list[ChunkData],
+        metadata: dict[str, Any],
+        options: ExportOptions | None = None,
     ) -> str:
         options = options or ExportOptions(
-            format="html",
-            include_tashkeel=True,
-            rtl=True,
-            chapter_navigation=True
+            format="html", include_tashkeel=True, rtl=True, chapter_navigation=True
         )
 
         template = self.env.get_template("document.html")
 
-        output_path = Path.home() / "Documents" / "Anees" / "exports" / f"export_{uuid.uuid4().hex[:8]}.html"
+        output_path = (
+            Path.home() / "Documents" / "Anees" / "exports" / f"export_{uuid.uuid4().hex[:8]}.html"
+        )
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         from datetime import datetime
+
         html = template.render(
             chunks=chunks,
             metadata=metadata,
             options=options,
             rtl=options.rtl,
             lang="ar" if options.rtl else "en",
-            export_date=datetime.now().strftime("%Y-%m-%d %H:%M")
+            export_date=datetime.now().strftime("%Y-%m-%d %H:%M"),
         )
 
-        output_path.write_text(html, encoding='utf-8')
+        output_path.write_text(html, encoding="utf-8")
         logger.info(f"HTML exported to {output_path}")
         return str(output_path)

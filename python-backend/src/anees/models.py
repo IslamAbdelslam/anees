@@ -1,9 +1,9 @@
 """Pydantic models for Anees backend"""
 
-from typing import List, Optional, Literal
-from pydantic import BaseModel, Field
 from datetime import datetime
-from uuid import UUID
+from typing import Literal
+
+from pydantic import BaseModel
 
 
 class TextSegment(BaseModel):
@@ -11,16 +11,16 @@ class TextSegment(BaseModel):
     text: str
     lang: str
     confidence: float = 1.0
-    bbox: Optional[List[float]] = None
+    bbox: list[float] | None = None
 
 
 class ChunkData(BaseModel):
     chunk_index: int
-    page_range: List[int]
-    segments: List[TextSegment]
+    page_range: list[int]
+    segments: list[TextSegment]
     status: Literal["pending", "processing", "completed", "flagged", "failed"] = "pending"
     progress: float = 0.0
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class PdfInfo(BaseModel):
@@ -28,7 +28,7 @@ class PdfInfo(BaseModel):
     has_text: bool
     file_size: int
     encrypted: bool
-    detected_langs: List[str] = []
+    detected_langs: list[str] = []
 
 
 class VoiceInfo(BaseModel):
@@ -58,8 +58,8 @@ class JobStatus(BaseModel):
     total_chunks: int
     stage: str
     message: str
-    output_path: Optional[str] = None
-    error: Optional[str] = None
+    output_path: str | None = None
+    error: str | None = None
     started_at: datetime
     updated_at: datetime
 

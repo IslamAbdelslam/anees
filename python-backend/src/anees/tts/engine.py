@@ -1,27 +1,27 @@
 """TTS Engine using ONNX Runtime"""
 
-import onnxruntime as ort
-import numpy as np
-from pathlib import Path
-from typing import Dict, Optional, List
 import logging
+from pathlib import Path
+
+import numpy as np
+import onnxruntime as ort
 
 logger = logging.getLogger("anees.tts")
 
 
 class TTSEngine:
-    def __init__(self, models_dir: Optional[Path] = None):
+    def __init__(self, models_dir: Path | None = None):
         self.models_dir = models_dir or Path.home() / ".config" / "anees" / "models"
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
-        self.sessions: Dict[str, ort.InferenceSession] = {}
-        self.tokenizers: Dict[str, any] = {}
-        self.configs: Dict[str, Dict] = {}
+        self.sessions: dict[str, ort.InferenceSession] = {}
+        self.tokenizers: dict[str, any] = {}
+        self.configs: dict[str, dict] = {}
 
         # Voice embeddings
-        self.voice_embeddings: Dict[str, np.ndarray] = {}
+        self.voice_embeddings: dict[str, np.ndarray] = {}
 
-    def ensure_models(self, model_names: List[str]) -> Dict[str, str]:
+    def ensure_models(self, model_names: list[str]) -> dict[str, str]:
         """Download and verify models from Hugging Face"""
         from huggingface_hub import hf_hub_download
 
@@ -46,8 +46,8 @@ class TTSEngine:
                     hf_hub_download(repo_id=repo, filename=fname, local_dir=model_dir)
                 paths[name] = str(model_dir)
                 logger.info(f"Model {name} ready at {model_dir}")
-            except Exception as e:
-                logger.error(f"Failed to download {name}: {e}")
+            except Exception:
+                logger.exception(f"Failed to download {name}")
 
         return paths
 
@@ -69,12 +69,12 @@ class TTSEngine:
                     raise FileNotFoundError(f"Model not found: {model_path}")
 
             self.sessions[model_name] = ort.InferenceSession(
-                str(model_path),
-                providers=['CPUExecutionProvider']
+                str(model_path), providers=["CPUExecutionProvider"]
             )
 
             # Load config
             import json
+
             config_path = self.models_dir / model_name / "config.json"
             if config_path.exists():
                 with open(config_path) as f:
@@ -98,15 +98,8 @@ class TTSEngine:
         phoneme_ids = [vocab.get(c, 0) for c in text[:512]]
         return np.array([phoneme_ids], dtype=np.int64)
 
-    def synthesize(
-        self,
-        text: str,
-        lang: str,
-        voice: str,
-        speed: float = 1.0
-    ) -> np.ndarray:
+    def synthesize(self, text: str, lang: str, voice: str, speed: float = 1.0) -> np.ndarray:
         """Synthesize speech from text"""
-        model_name = "nabra-7m-distill" if lang == "ar" else "kokoro-7m-distill"
         session = self._load_model(lang)
 
         # Phonemize
@@ -122,13 +115,13 @@ class TTSEngine:
                 {
                     "phonemes": phoneme_ids,
                     "voice_embedding": voice_emb,
-                    "speed": np.array([speed], dtype=np.float32)
-                }
+                    "speed": np.array([speed], dtype=np.float32),
+                },
             )
             audio = outputs[0].squeeze()
             return audio.astype(np.float32)
-        except Exception as e:
-            logger.error(f"TTS inference failed: {e}")
+        except Exception:
+            logger.exception("TTS inference failed")
             # Return silence as fallback
             return np.zeros(24000, dtype=np.float32)
 
