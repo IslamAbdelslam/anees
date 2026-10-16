@@ -11,4 +11,6 @@ Weights vendored for the Anees design system (Issue #4):
 | `IBMPlexSansArabic-Bold.ttf` | 700 | Display 40px/700 |
 
 Loaded at startup via `FontData::from_static` (see `theme::fonts()`).
-Full license text: https://openfontlicense.org
+The full license text ships alongside the fonts in `OFL.txt`
+(SIL Open Font License 1.1 requires it to travel with the files):
+https://openfontlicense.org

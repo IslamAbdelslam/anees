@@ -134,6 +134,10 @@ pub fn visuals() -> Visuals {
 }
 
 /// Font stack with IBM Plex Sans Arabic embedded (OFL, see assets/fonts).
+/// Proportional (body) resolves to Regular. egui 0.29 has no automatic
+/// weight matching, so bold goes through the dedicated `display` and
+/// `headline` families; plain `strong()` body text falls back to Regular
+/// (acceptable until rich-text bidi work in #28).
 /// Proportional (body) and both headings resolve to it; monospace keeps the
 /// bundled font for hashes/ids.
 pub fn fonts() -> FontDefinitions {

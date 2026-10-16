@@ -82,10 +82,24 @@ pub fn chip_colors(selected: bool) -> (Color32, Color32) {
     }
 }
 
-/// mm:ss with whole-second rounding (never emits 00:60).
+/// Width reserved for the time readout next to the progress bar.
+/// Narrow panels clamp to 40px rather than going negative (see `show`).
+pub const TIME_LABEL_WIDTH_PX: f32 = 110.0;
+
+/// Format seconds as `mm:ss`, rolling over to `h:mm:ss` past one hour.
+/// Rounds whole seconds first, so it never emits `00:60`.
 pub fn fmt_time(secs: f32) -> String {
     let total = secs.round().max(0.0) as u32;
-    format!("{:02}:{:02}", total / 60, total % 60)
+    if total >= 3600 {
+        format!(
+            "{}:{:02}:{:02}",
+            total / 3600,
+            (total / 60) % 60,
+            total % 60
+        )
+    } else {
+        format!("{:02}:{:02}", total / 60, total % 60)
+    }
 }
 
 /// Audio player state machine. Rendering (`show`) is a thin view over this.
@@ -102,16 +116,29 @@ pub struct AudioPlayer {
     /// Seconds into the track.
     position_secs: f32,
     /// Total track length in seconds.
-    pub duration_secs: f32,
+    duration_secs: f32,
 }
 
 impl AudioPlayer {
     pub fn new(duration_secs: f32) -> Self {
-        Self {
+        let mut player = Self {
             state: PlayerState::Stopped,
             position_secs: 0.0,
-            duration_secs: duration_secs.max(0.0),
-        }
+            duration_secs: 0.0,
+        };
+        player.set_duration(duration_secs);
+        player
+    }
+
+    /// Total track length in seconds.
+    pub fn duration(&self) -> f32 {
+        self.duration_secs
+    }
+
+    /// Reset the track length (e.g. new file loaded); rewinds to start.
+    pub fn set_duration(&mut self, duration_secs: f32) {
+        self.duration_secs = duration_secs.max(0.0);
+        self.position_secs = 0.0;
     }
 
     pub fn state(&self) -> &PlayerState {
@@ -188,7 +215,7 @@ impl AudioPlayer {
                 .fill(palette::secondary())
                 .show_percentage();
             ui.add_sized(
-                egui::vec2((ui.available_width() - 110.0).max(40.0), 18.0),
+                egui::vec2((ui.available_width() - TIME_LABEL_WIDTH_PX).max(40.0), 18.0),
                 bar,
             );
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -236,6 +263,7 @@ mod tests {
         assert_eq!(fmt_time(59.4), "00:59");
         assert_eq!(fmt_time(59.6), "01:00");
         assert_eq!(fmt_time(125.0), "02:05");
+        assert_eq!(fmt_time(3720.0), "1:02:00");
     }
 
     #[test]
