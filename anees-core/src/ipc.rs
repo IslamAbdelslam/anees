@@ -54,6 +54,58 @@ pub struct RpcError {
     pub data: Option<Value>,
 }
 
+/// Standard JSON-RPC 2.0 error codes (https://www.jsonrpc.org/specification).
+/// Codes -32000..-32099 are reserved for implementation-defined server errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ErrorCode {
+    ParseError = -32700,
+    InvalidRequest = -32600,
+    MethodNotFound = -32601,
+    InvalidParams = -32602,
+    InternalError = -32603,
+}
+
+impl ErrorCode {
+    pub fn code(self) -> i32 {
+        self as i32
+    }
+
+    /// Bounds of the implementation-defined server-error range.
+    pub const SERVER_ERROR_MIN: i32 = -32099;
+    pub const SERVER_ERROR_MAX: i32 = -32000;
+
+    /// True for codes in the -32000..-32099 server range (e.g. -32001
+    /// job-not-found sent by the Python backend). The client accepts any
+    /// i32 on the wire; this only classifies.
+    pub fn is_server_error(code: i32) -> bool {
+        (Self::SERVER_ERROR_MIN..=Self::SERVER_ERROR_MAX).contains(&code)
+    }
+}
+
+impl RpcError {
+    /// Error with a standard code and concise message.
+    pub fn standard(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code: code.code(),
+            message: message.into(),
+            data: None,
+        }
+    }
+}
+
+/// Parse one NDJSON line, enforcing `jsonrpc == "2.0"` (else Invalid Request).
+pub fn parse_message(line: &str) -> Result<IpcMessage> {
+    let value: Value = serde_json::from_str(line)?;
+    match value.get("jsonrpc") {
+        Some(Value::String(v)) if v == "2.0" => Ok(serde_json::from_value(value)?),
+        _ => Err(AneesError::Ipc(format!(
+            "Invalid Request ({}): jsonrpc must be \"2.0\"",
+            ErrorCode::InvalidRequest.code()
+        ))),
+    }
+}
+
 /// JSON-RPC Notification (server → client)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -236,7 +288,7 @@ where
                 let line = self.buffer.split_to(pos + 1);
                 let line_str = std::str::from_utf8(&line[..pos])?;
                 if !line_str.trim().is_empty() {
-                    return Ok(Some(serde_json::from_str(line_str)?));
+                    return Ok(Some(parse_message(line_str)?));
                 }
             }
 
@@ -313,7 +365,7 @@ where
                 let line = self.buffer.split_to(pos + 1);
                 let line_str = std::str::from_utf8(&line[..pos])?;
                 if !line_str.trim().is_empty() {
-                    return Ok(Some(serde_json::from_str(line_str)?));
+                    return Ok(Some(parse_message(line_str)?));
                 }
             }
 
@@ -434,7 +486,82 @@ mod tests {
             params: None,
         });
         writer.send(&ping).await.unwrap();
-        let got = reader.receive().await.unwrap().expect("one message");
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), reader.receive())
+            .await
+            .expect("transport must answer")
+            .unwrap()
+            .expect("one message");
         assert!(matches!(got, IpcMessage::Request(Request::WithId { .. })));
+    }
+
+    #[test]
+    fn error_codes_match_spec() {
+        assert_eq!(ErrorCode::ParseError.code(), -32700);
+        assert_eq!(ErrorCode::InvalidRequest.code(), -32600);
+        assert_eq!(ErrorCode::MethodNotFound.code(), -32601);
+        assert_eq!(ErrorCode::InvalidParams.code(), -32602);
+        assert_eq!(ErrorCode::InternalError.code(), -32603);
+        let e = RpcError::standard(ErrorCode::MethodNotFound, "Method not found: foo");
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["code"], -32601);
+        assert!(v.get("data").is_none());
+    }
+
+    #[test]
+    fn wrong_version_rejected() {
+        assert!(parse_message(r#"{"jsonrpc":"1.0","id":1,"method":"ping"}"#).is_err());
+        assert!(parse_message(r#"{"id":1,"method":"ping"}"#).is_err());
+        assert!(parse_message(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#).is_ok());
+    }
+    #[test]
+    fn notification_carries_no_id() {
+        // Per spec the server MUST NOT reply to notifications; framing
+        // check: a serialized notification has no id member at all.
+        let notif = Notification {
+            jsonrpc: "2.0".to_string(),
+            method: "progress".to_string(),
+            params: None,
+        };
+        let s = serde_json::to_string(&IpcMessage::Notification(notif)).unwrap();
+        assert!(!s.contains("\"id\""), "notification must not carry id: {s}");
+    }
+
+    #[test]
+    fn notification_parses_without_id() {
+        let msg = parse_message(r#"{"jsonrpc":"2.0","method":"progress","params":{"stage":"x"}}"#)
+            .expect("valid notification must parse");
+        assert!(matches!(msg, IpcMessage::Notification(_)));
+    }
+
+    #[test]
+    fn server_error_range_classified() {
+        assert!(ErrorCode::is_server_error(-32001));
+        assert!(ErrorCode::is_server_error(-32000));
+        assert!(ErrorCode::is_server_error(-32099));
+        assert!(!ErrorCode::is_server_error(-32601));
+        assert!(!ErrorCode::is_server_error(0));
+    }
+
+    #[test]
+    fn ping_roundtrip_under_10ms() {
+        // Issue #2 acceptance: ping round-trip < 10 ms. Measured in-process
+        // (serialize + parse); I/O bound is covered by the duplex test above.
+        let ping = IpcMessage::Request(Request::WithId {
+            jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(1),
+            method: "ping".to_string(),
+            params: None,
+        });
+        let line = serde_json::to_string(&ping).unwrap();
+        let n = 100u32;
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            let msg = parse_message(&line).unwrap();
+            assert!(matches!(msg, IpcMessage::Request(Request::WithId { .. })));
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(10) * n,
+            "average ping round-trip must stay under 10 ms"
+        );
     }
 }

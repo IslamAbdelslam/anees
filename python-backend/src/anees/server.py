@@ -5,9 +5,9 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -32,21 +32,23 @@ logger = logging.getLogger("anees")
 
 
 class JSONRPCRequest(BaseModel):
-    jsonrpc: str = "2.0"
+    jsonrpc: Literal["2.0"] = "2.0"
     id: Any = None
     method: str
-    params: dict[str, Any] | None = None
+    # Any: shape enforced in handle_request (-32602) so bad params are
+    # reported as Invalid params, not Invalid Request.
+    params: Any = None
 
 
 class JSONRPCResponse(BaseModel):
-    jsonrpc: str = "2.0"
+    jsonrpc: Literal["2.0"] = "2.0"
     id: Any = None
     result: Any = None
     error: dict[str, Any] | None = None
 
 
 class JSONRPCNotification(BaseModel):
-    jsonrpc: str = "2.0"
+    jsonrpc: Literal["2.0"] = "2.0"
     method: str
     params: dict[str, Any] | None = None
 
@@ -96,15 +98,55 @@ class AneesRPCServer:
                 id=request.id, error={"code": -32601, "message": f"Method not found: {method}"}
             )
 
+        # This server accepts by-name (object) params only, per docs/protocol.md.
+        # Per-method schemas are enforced by the issues owning each method (#7-#17).
+        if not isinstance(params, dict):
+            return JSONRPCResponse(
+                id=request.id, error={"code": -32602, "message": "Invalid params: object expected"}
+            )
+
         try:
             result = await self.methods[method](params)
             return JSONRPCResponse(id=request.id, result=result)
+        except ValueError as e:
+            # Handler-level param errors (missing/invalid params).
+            return JSONRPCResponse(id=request.id, error={"code": -32602, "message": str(e)})
         except Exception as e:
             logger.exception(f"Error in method {method}")
             return JSONRPCResponse(id=request.id, error={"code": -32603, "message": str(e)})
 
     async def handle_notification(self, notification: JSONRPCNotification):
         logger.debug(f"Notification: {notification.method}")
+
+    def attach_writer(self, writer) -> None:
+        """Attach the stdout writer so the server can push notifications."""
+        self._writer = writer
+
+    async def emit_notification(self, method: str, params: dict[str, Any] | None = None) -> bool:
+        """Push a server→client notification. Returns False if unwritable."""
+        writer = getattr(self, "_writer", None)
+        if writer is None:
+            return False
+        notification = JSONRPCNotification(method=method, params=params)
+        writer.write((notification.model_dump_json() + "\n").encode())
+        await writer.drain()
+        return True
+
+    async def emit_progress(self, stage: str, chunk: int, total: int, message: str = "") -> bool:
+        progress = chunk / total if total > 0 else 0.0
+        return await self.emit_notification(
+            "progress",
+            {
+                "stage": stage,
+                "chunk": chunk,
+                "total": total,
+                "message": message,
+                "progress": progress,
+            },
+        )
+
+    async def emit_log(self, level: str, message: str) -> bool:
+        return await self.emit_notification("log", {"level": level, "message": message})
 
     # --- Method implementations ---
 
@@ -233,8 +275,14 @@ async def main():
         asyncio.streams.FlowControlMixin, sys.stdout
     )
     writer = asyncio.StreamWriter(writer_transport, writer_protocol, None, asyncio.get_event_loop())
+    server.attach_writer(writer)
 
     logger.info("Anees RPC Server started")
+
+    async def send_error_response(req_id: Any, code: int, message: str) -> None:
+        response = JSONRPCResponse(id=req_id, error={"code": code, "message": message})
+        writer.write((response.model_dump_json() + "\n").encode())
+        await writer.drain()
 
     while True:
         line = await reader.readline()
@@ -247,18 +295,39 @@ async def main():
 
         try:
             data = json.loads(line)
-            if "id" in data and data.get("id") is not None:
-                request = JSONRPCRequest(**data)
-                response = await server.handle_request(request)
-                writer.write((response.model_dump_json() + "\n").encode())
-                await writer.drain()
-            else:
-                notification = JSONRPCNotification(**data)
-                await server.handle_notification(notification)
         except json.JSONDecodeError:
-            logger.error(f"Invalid JSON: {line}")
-        except Exception:
-            logger.exception("Error processing request")
+            # Unparseable: the id is unknowable, answer with null per spec.
+            await send_error_response(None, -32700, "Parse error: invalid JSON")
+            continue
+
+        if not isinstance(data, dict):
+            await send_error_response(None, -32600, "Invalid Request: object expected")
+            continue
+
+        if "id" in data and data["id"] is not None:
+            try:
+                request = JSONRPCRequest.model_validate(data)
+            except ValidationError as e:
+                await send_error_response(
+                    data["id"], -32600, f"Invalid Request: {e.errors()[0]['msg']}"
+                )
+                continue
+            response = await server.handle_request(request)
+            writer.write((response.model_dump_json() + "\n").encode())
+            await writer.drain()
+        elif "id" in data:
+            # Explicit null id: has an id member so it is not a notification,
+            # but null ids are invalid -> -32600 echoing null.
+            await send_error_response(None, -32600, "Invalid Request: id must not be null")
+        else:
+            # Notification: handle and never reply (no write below).
+            try:
+                notification = JSONRPCNotification.model_validate(data)
+            except ValidationError as e:
+                await send_error_response(None, -32600, f"Invalid Request: {e.errors()[0]['msg']}")
+                continue
+            await server.handle_notification(notification)
+            continue
 
     writer.close()
     await writer.wait_closed()
