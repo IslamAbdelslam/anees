@@ -296,28 +296,38 @@ async def main():
         try:
             data = json.loads(line)
         except json.JSONDecodeError:
-            # -32700: id unknown, per spec answer with id null.
+            # Unparseable: the id is unknowable, answer with null per spec.
             await send_error_response(None, -32700, "Parse error: invalid JSON")
             continue
 
-        try:
-            # No (non-null) id member -> notification: never reply.
-            if "id" in data and data.get("id") is not None:
+        if not isinstance(data, dict):
+            await send_error_response(None, -32600, "Invalid Request: object expected")
+            continue
+
+        if "id" in data and data["id"] is not None:
+            try:
                 request = JSONRPCRequest.model_validate(data)
-                response = await server.handle_request(request)
-                writer.write((response.model_dump_json() + "\n").encode())
-                await writer.drain()
-            else:
-                # Notification: handle and never reply (no write below).
-                notification = JSONRPCNotification.model_validate(data)
-                await server.handle_notification(notification)
+            except ValidationError as e:
+                await send_error_response(
+                    data["id"], -32600, f"Invalid Request: {e.errors()[0]['msg']}"
+                )
                 continue
-        except ValidationError as e:
-            # -32600: echo the id when we have one, else null.
-            req_id = data.get("id") if isinstance(data, dict) else None
-            await send_error_response(req_id, -32600, f"Invalid Request: {e.errors()[0]['msg']}")
-        except Exception:
-            logger.exception("Error processing request")
+            response = await server.handle_request(request)
+            writer.write((response.model_dump_json() + "\n").encode())
+            await writer.drain()
+        elif "id" in data:
+            # Explicit null id: has an id member so it is not a notification,
+            # but null ids are invalid -> -32600 echoing null.
+            await send_error_response(None, -32600, "Invalid Request: id must not be null")
+        else:
+            # Notification: handle and never reply (no write below).
+            try:
+                notification = JSONRPCNotification.model_validate(data)
+            except ValidationError as e:
+                await send_error_response(None, -32600, f"Invalid Request: {e.errors()[0]['msg']}")
+                continue
+            await server.handle_notification(notification)
+            continue
 
     writer.close()
     await writer.wait_closed()

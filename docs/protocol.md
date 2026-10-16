@@ -26,6 +26,7 @@ under Conformance.
 - `jsonrpc`: MUST be exactly `"2.0"` (anything else → `-32600`).
 - `id`: number or string, echoed verbatim in the response. `null` ids are
   discouraged; a message **without** an `id` member is a notification.
+  An explicit `null` id is an Invalid Request (`-32600`, echoed as `null`).
 - `method`: one of the 14 methods in §3 (unknown → `-32601`).
 - `params`: object (per-method schema) or omitted. Wrong shape → `-32602`.
   This server accepts by-name (object) params only; positional arrays are
