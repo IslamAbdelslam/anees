@@ -7,7 +7,6 @@ use anees_core::{
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing_subscriber::{fmt, EnvFilter};
 use uuid::Uuid;
 
@@ -159,13 +158,11 @@ async fn main() -> Result<()> {
     // across `read_buf().await` while the writer needs to send.
     let transport = StdioTransport::new(stdout, stdin);
     let (mut reader, writer) = transport.split();
-    let writer = Arc::new(Mutex::new(writer));
-
-    let writer_clone = writer.clone();
-
+    // Writer half is owned by its task: single consumer, no lock needed.
     tokio::spawn(async move {
+        let mut writer = writer;
         while let Some(msg) = rx.recv().await {
-            if let Err(e) = writer_clone.lock().await.send(&msg).await {
+            if let Err(e) = writer.send(&msg).await {
                 tracing::error!("Failed to send IPC message: {}", e);
                 break;
             }
@@ -176,24 +173,32 @@ async fn main() -> Result<()> {
     let client_clone = client.clone();
 
     tokio::spawn(async move {
-        while let Ok(Some(msg)) = reader.receive().await {
-            match msg {
-                IpcMessage::Response(resp) => {
-                    client_clone.handle_response(resp).await;
+        loop {
+            match reader.receive().await {
+                Ok(Some(msg)) => match msg {
+                    IpcMessage::Response(resp) => {
+                        client_clone.handle_response(resp).await;
+                    }
+                    IpcMessage::Notification(notif) => {
+                        client_clone.handle_notification(notif).await;
+                    }
+                    IpcMessage::Request(Request::Notification { method, params, .. }) => {
+                        client_clone
+                            .handle_notification(anees_core::Notification {
+                                jsonrpc: "2.0".to_string(),
+                                method,
+                                params,
+                            })
+                            .await;
+                    }
+                    _ => {}
+                },
+                // A malformed line must never kill delivery (see BackendManager).
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!("Skipping malformed IPC line: {}", e);
+                    continue;
                 }
-                IpcMessage::Notification(notif) => {
-                    client_clone.handle_notification(notif).await;
-                }
-                IpcMessage::Request(Request::Notification { method, params, .. }) => {
-                    client_clone
-                        .handle_notification(anees_core::Notification {
-                            jsonrpc: "2.0".to_string(),
-                            method,
-                            params,
-                        })
-                        .await;
-                }
-                _ => {}
             }
         }
     });
@@ -236,6 +241,7 @@ async fn main() -> Result<()> {
             Err(e) => {
                 tracing::error!("Failed to connect to Python backend: {}", e);
                 child.kill().await.ok();
+                child.wait().await.ok();
                 return Err(e);
             }
         }
@@ -341,7 +347,8 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Shutdown
+    // Shutdown (kill + wait: never leave a zombie).
     child.kill().await.ok();
+    child.wait().await.ok();
     result
 }

@@ -185,32 +185,40 @@ impl BackendManager {
                 }
             }
         }));
-
         let reader_client = client.clone();
         self.io_tasks.push(tokio::spawn(async move {
             let mut reader = reader;
-            while let Ok(Some(msg)) = reader.receive().await {
-                match msg {
-                    IpcMessage::Response(resp) => {
-                        reader_client.handle_response(resp).await;
+            loop {
+                match reader.receive().await {
+                    Ok(Some(msg)) => match msg {
+                        IpcMessage::Response(resp) => {
+                            reader_client.handle_response(resp).await;
+                        }
+                        IpcMessage::Notification(notif) => {
+                            reader_client.handle_notification(notif).await;
+                        }
+                        IpcMessage::Request(Request::Notification { method, params, .. }) => {
+                            reader_client
+                                .handle_notification(Notification {
+                                    jsonrpc: "2.0".to_string(),
+                                    method,
+                                    params,
+                                })
+                                .await;
+                        }
+                        _ => {}
+                    },
+                    // A malformed line (stray print, traceback fragment)
+                    // must never kill delivery: log and keep reading.
+                    // Only EOF ends the loop.
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::warn!("Skipping malformed IPC line: {e}");
+                        continue;
                     }
-                    IpcMessage::Notification(notif) => {
-                        reader_client.handle_notification(notif).await;
-                    }
-                    IpcMessage::Request(Request::Notification { method, params, .. }) => {
-                        reader_client
-                            .handle_notification(Notification {
-                                jsonrpc: "2.0".to_string(),
-                                method,
-                                params,
-                            })
-                            .await;
-                    }
-                    _ => {}
                 }
             }
         }));
-
         // Server notifications → manager channel (progress/log feed).
         let fwd_tx = self.notif_tx.clone();
         self.io_tasks.push(tokio::spawn(async move {
@@ -244,26 +252,44 @@ impl BackendManager {
         client.call(method, params).await
     }
 
-    /// Ping health check bounded by `startup_timeout`.
+    /// Ping health check bounded by `startup_timeout`. Uses
+    /// [`IpcClient::call_with_timeout`] so a dead backend surfaces as an
+    /// error instead of leaking a pending entry.
     pub async fn health_check(&self) -> Result<Value> {
         let client = self
             .client
             .as_ref()
             .ok_or_else(|| AneesError::PythonBackend("backend not running".to_string()))?;
-        match tokio::time::timeout(self.config.startup_timeout, client.call("ping", None)).await {
-            Ok(result) => result,
-            Err(_) => Err(AneesError::Timeout("backend ping timed out".to_string())),
-        }
+        client
+            .call_with_timeout("ping", None, self.config.startup_timeout)
+            .await
     }
 
-    /// Ensure a healthy backend: no-op when running, otherwise restart with
+    /// Ensure a healthy backend: ping when running (alive is not healthy —
+    /// a wedged backend still answers `try_wait`), otherwise restart with
     /// backoff up to `max_restarts`, verifying each restart with a ping.
     /// Resets the restart counter on success.
+    ///
+    /// Note: `is_running` needs `&mut` (`try_wait` reaps), so shared
+    /// polling should wrap the manager in a `Mutex`.
     pub async fn ensure_running(&mut self) -> Result<()> {
         if self.is_running() {
-            return Ok(());
+            return match self.health_check().await {
+                Ok(_) => {
+                    self.restarts = 0;
+                    Ok(())
+                }
+                Err(_) => {
+                    self.shutdown().await;
+                    self.restart_loop().await
+                }
+            };
         }
-        let mut attempt = 0u32;
+        self.restart_loop().await
+    }
+
+    async fn restart_loop(&mut self) -> Result<()> {
+        let mut attempt = self.restarts;
         loop {
             if attempt >= self.config.max_restarts {
                 return Err(AneesError::PythonBackend(format!(
@@ -313,6 +339,17 @@ impl BackendManager {
     }
 }
 
+impl Drop for BackendManager {
+    /// Backstop: abort IO tasks synchronously. The child itself is killed
+    /// by `kill_on_drop(true)` (without reaping — call [`Self::shutdown`]
+    /// for a clean, reaped exit).
+    fn drop(&mut self) {
+        for handle in self.io_tasks.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,12 +362,25 @@ mod tests {
             models_dir: None,
             max_restarts: 2,
             restart_backoff: Duration::from_millis(0),
-            startup_timeout: Duration::from_secs(10),
+            startup_timeout: Duration::from_secs(2),
         }
     }
 
     /// Minimal JSON-RPC responder over stdio (no backend deps needed).
-    const RESPONDER: &str = "import sys, json\nfor line in sys.stdin:\n    line = line.strip()\n    if not line:\n        continue\n    try:\n        msg = json.loads(line)\n    except Exception:\n        continue\n    sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': msg.get('id'), 'result': {'status': 'ok'}}) + chr(10))\n    sys.stdout.flush()\n";
+    /// Prints one garbage line first: the reader must skip it without
+    /// dying, proving malformed-line resilience end to end.
+    const RESPONDER: &str = "import sys, json\nprint('boot noise (not JSON)', flush=True)\nfor line in sys.stdin:\n    line = line.strip()\n    if not line:\n        continue\n    try:\n        msg = json.loads(line)\n    except Exception:\n        continue\n    sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': msg.get('id'), 'result': {'status': 'ok'}}) + chr(10))\n    sys.stdout.flush()\n";
+
+    /// Wait (bounded) until the child has exited.
+    async fn wait_for_exit(mgr: &mut BackendManager) {
+        for _ in 0..100 {
+            if !mgr.is_running() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("child did not exit in time");
+    }
 
     #[tokio::test]
     async fn spawn_failure_gives_up_after_max_restarts() {
@@ -384,9 +434,22 @@ mod tests {
         let (mut mgr, _stderr, _notif) =
             BackendManager::new(test_config("python3", "-c", &[script]));
         mgr.start().await.expect("python3 must exist on CI");
-        // Let the instant crash happen before supervising.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(!mgr.is_running());
+        wait_for_exit(&mut mgr).await;
+        let err = mgr.ensure_running().await.unwrap_err();
+        assert!(err.to_string().contains("failed to stay up"));
+        assert_eq!(mgr.restart_count(), 2);
+        mgr.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unresponsive_backend_fails_health_and_restarts() {
+        // Never answers: ping must time out (2 s budget, not hang), and
+        // supervision must burn its restart budget and give up.
+        let script = "import time; time.sleep(60)";
+        let (mut mgr, _stderr, _notif) =
+            BackendManager::new(test_config("python3", "-c", &[script]));
+        mgr.start().await.expect("python3 must exist on CI");
+        assert!(mgr.health_check().await.is_err());
         let err = mgr.ensure_running().await.unwrap_err();
         assert!(err.to_string().contains("failed to stay up"));
         assert_eq!(mgr.restart_count(), 2);

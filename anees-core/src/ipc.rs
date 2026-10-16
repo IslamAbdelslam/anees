@@ -190,8 +190,33 @@ impl IpcClient {
         }
     }
 
-    /// Send a request and wait for response
+    /// Send a request and wait for response.
+    ///
+    /// Unbounded by design: synthesis calls can run for minutes, and an
+    /// arbitrary default would break them. Use [`Self::call_with_timeout`]
+    /// where a bound is wanted (e.g. supervision pings).
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        self.do_call(method, params, None).await
+    }
+
+    /// Send a request and wait for response, giving up after `timeout`.
+    /// The pending entry is always removed — on success, error, timeout
+    /// or send failure — so dead calls never leak map entries.
+    pub async fn call_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: std::time::Duration,
+    ) -> Result<Value> {
+        self.do_call(method, params, Some(timeout)).await
+    }
+
+    async fn do_call(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Value> {
         let id = Value::Number(serde_json::Number::from(fastrand::u64(..)));
         let request = Request::WithId {
             jsonrpc: "2.0".to_string(),
@@ -203,13 +228,35 @@ impl IpcClient {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id.clone(), tx);
 
-        self.sender
-            .send(IpcMessage::Request(request))
-            .map_err(|_| AneesError::Ipc("Failed to send request".to_string()))?;
+        if let Err(e) = self.sender.send(IpcMessage::Request(request)) {
+            self.pending.lock().await.remove(&id);
+            return Err(AneesError::Ipc(format!("Failed to send request: {e}")));
+        }
 
-        let response = rx
-            .await
-            .map_err(|_| AneesError::Ipc("Request cancelled".to_string()))?;
+        let response = match timeout {
+            Some(t) => match tokio::time::timeout(t, rx).await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(_)) => {
+                    self.pending.lock().await.remove(&id);
+                    return Err(AneesError::Ipc("Request cancelled".to_string()));
+                }
+                Err(_) => {
+                    self.pending.lock().await.remove(&id);
+                    return Err(AneesError::Timeout(format!("request '{method}' timed out")));
+                }
+            },
+            None => match rx.await {
+                Ok(resp) => resp,
+                Err(_) => {
+                    self.pending.lock().await.remove(&id);
+                    return Err(AneesError::Ipc("Request cancelled".to_string()));
+                }
+            },
+        };
+        // Delivered responses already removed the entry in
+        // `handle_response`; the extra remove is a no-op. Timeout and
+        // error paths removed it above, so dead calls never leak.
+        self.pending.lock().await.remove(&id);
 
         match response {
             Response::Success { result, .. } => Ok(result),
