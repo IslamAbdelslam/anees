@@ -70,6 +70,17 @@ impl ErrorCode {
     pub fn code(self) -> i32 {
         self as i32
     }
+
+    /// Bounds of the implementation-defined server-error range.
+    pub const SERVER_ERROR_MIN: i32 = -32099;
+    pub const SERVER_ERROR_MAX: i32 = -32000;
+
+    /// True for codes in the -32000..-32099 server range (e.g. -32001
+    /// job-not-found sent by the Python backend). The client accepts any
+    /// i32 on the wire; this only classifies.
+    pub fn is_server_error(code: i32) -> bool {
+        (Self::SERVER_ERROR_MIN..=Self::SERVER_ERROR_MAX).contains(&code)
+    }
 }
 
 impl RpcError {
@@ -88,9 +99,10 @@ pub fn parse_message(line: &str) -> Result<IpcMessage> {
     let value: Value = serde_json::from_str(line)?;
     match value.get("jsonrpc") {
         Some(Value::String(v)) if v == "2.0" => Ok(serde_json::from_value(value)?),
-        _ => Err(AneesError::Ipc(
-            "Invalid Request: jsonrpc must be \"2.0\"".to_string(),
-        )),
+        _ => Err(AneesError::Ipc(format!(
+            "Invalid Request ({}): jsonrpc must be \"2.0\"",
+            ErrorCode::InvalidRequest.code()
+        ))),
     }
 }
 
@@ -474,7 +486,11 @@ mod tests {
             params: None,
         });
         writer.send(&ping).await.unwrap();
-        let got = reader.receive().await.unwrap().expect("one message");
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), reader.receive())
+            .await
+            .expect("transport must answer")
+            .unwrap()
+            .expect("one message");
         assert!(matches!(got, IpcMessage::Request(Request::WithId { .. })));
     }
 
@@ -497,7 +513,6 @@ mod tests {
         assert!(parse_message(r#"{"id":1,"method":"ping"}"#).is_err());
         assert!(parse_message(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#).is_ok());
     }
-
     #[test]
     fn notification_carries_no_id() {
         // Per spec the server MUST NOT reply to notifications; framing
@@ -509,6 +524,22 @@ mod tests {
         };
         let s = serde_json::to_string(&IpcMessage::Notification(notif)).unwrap();
         assert!(!s.contains("\"id\""), "notification must not carry id: {s}");
+    }
+
+    #[test]
+    fn notification_parses_without_id() {
+        let msg = parse_message(r#"{"jsonrpc":"2.0","method":"progress","params":{"stage":"x"}}"#)
+            .expect("valid notification must parse");
+        assert!(matches!(msg, IpcMessage::Notification(_)));
+    }
+
+    #[test]
+    fn server_error_range_classified() {
+        assert!(ErrorCode::is_server_error(-32001));
+        assert!(ErrorCode::is_server_error(-32000));
+        assert!(ErrorCode::is_server_error(-32099));
+        assert!(!ErrorCode::is_server_error(-32601));
+        assert!(!ErrorCode::is_server_error(0));
     }
 
     #[test]

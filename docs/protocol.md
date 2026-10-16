@@ -28,6 +28,9 @@ under Conformance.
   discouraged; a message **without** an `id` member is a notification.
 - `method`: one of the 14 methods in §3 (unknown → `-32601`).
 - `params`: object (per-method schema) or omitted. Wrong shape → `-32602`.
+  This server accepts by-name (object) params only; positional arrays are
+  rejected. Per-method param schemas are enforced by the issues owning
+  each method (#7–#17).
 
 ### 2.2 Response (server → client)
 

@@ -35,7 +35,9 @@ class JSONRPCRequest(BaseModel):
     jsonrpc: Literal["2.0"] = "2.0"
     id: Any = None
     method: str
-    params: dict[str, Any] | None = None
+    # Any: shape enforced in handle_request (-32602) so bad params are
+    # reported as Invalid params, not Invalid Request.
+    params: Any = None
 
 
 class JSONRPCResponse(BaseModel):
@@ -94,6 +96,13 @@ class AneesRPCServer:
         if method not in self.methods:
             return JSONRPCResponse(
                 id=request.id, error={"code": -32601, "message": f"Method not found: {method}"}
+            )
+
+        # This server accepts by-name (object) params only, per docs/protocol.md.
+        # Per-method schemas are enforced by the issues owning each method (#7-#17).
+        if not isinstance(params, dict):
+            return JSONRPCResponse(
+                id=request.id, error={"code": -32602, "message": "Invalid params: object expected"}
             )
 
         try:
@@ -299,8 +308,10 @@ async def main():
                 writer.write((response.model_dump_json() + "\n").encode())
                 await writer.drain()
             else:
+                # Notification: handle and never reply (no write below).
                 notification = JSONRPCNotification.model_validate(data)
                 await server.handle_notification(notification)
+                continue
         except ValidationError as e:
             # -32600: echo the id when we have one, else null.
             req_id = data.get("id") if isinstance(data, dict) else None
