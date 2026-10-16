@@ -149,7 +149,10 @@ async fn main() -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (notif_tx, mut notif_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let client = Arc::new(Mutex::new(IpcClient::new(tx, notif_tx)));
+    // IpcClient is internally synchronized: share it bare, never hold an
+    // external lock across call()/handle_*() (that deadlocks: response
+    // delivery needs the same lock the caller waits on).
+    let client = Arc::new(IpcClient::new(tx, notif_tx));
 
     // Create transport with child process pipes, then split into
     // independently-owned halves so the reader task never holds a lock
@@ -176,15 +179,13 @@ async fn main() -> Result<()> {
         while let Ok(Some(msg)) = reader.receive().await {
             match msg {
                 IpcMessage::Response(resp) => {
-                    client_clone.lock().await.handle_response(resp).await;
+                    client_clone.handle_response(resp).await;
                 }
                 IpcMessage::Notification(notif) => {
-                    client_clone.lock().await.handle_notification(notif).await;
+                    client_clone.handle_notification(notif).await;
                 }
                 IpcMessage::Request(Request::Notification { method, params, .. }) => {
                     client_clone
-                        .lock()
-                        .await
                         .handle_notification(anees_core::Notification {
                             jsonrpc: "2.0".to_string(),
                             method,
@@ -230,7 +231,6 @@ async fn main() -> Result<()> {
 
     // Ping to verify connection
     {
-        let client = client.lock().await;
         match client.call("ping", None).await {
             Ok(_) => tracing::info!("Connected to Python backend"),
             Err(e) => {
@@ -245,7 +245,6 @@ async fn main() -> Result<()> {
     let result = match cli.command {
         Commands::Validate { path } => {
             let result: Value = {
-                let client = client.lock().await;
                 client
                     .call("pdf.validate", Some(json!({"path": path})))
                     .await?
@@ -261,10 +260,7 @@ async fn main() -> Result<()> {
             if let Some(l) = langs {
                 params["langs"] = json!(l.split(',').collect::<Vec<_>>());
             }
-            let result: Value = {
-                let client = client.lock().await;
-                client.call("pdf.extract_text", Some(params)).await?
-            };
+            let result: Value = { client.call("pdf.extract_text", Some(params)).await? };
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
@@ -276,16 +272,12 @@ async fn main() -> Result<()> {
             if let Some(l) = langs {
                 params["langs"] = json!(l.split(',').collect::<Vec<_>>());
             }
-            let result: Value = {
-                let client = client.lock().await;
-                client.call("pdf.ocr", Some(params)).await?
-            };
+            let result: Value = { client.call("pdf.ocr", Some(params)).await? };
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
         Commands::Tashkeel { text, mode } => {
             let result: Value = {
-                let client = client.lock().await;
                 client
                     .call(
                         "arabic.add_tashkeel",
@@ -304,7 +296,6 @@ async fn main() -> Result<()> {
             output: _output,
         } => {
             let result: Value = {
-                let client = client.lock().await;
                 client
                     .call(
                         "tts.synthesize",
@@ -326,7 +317,6 @@ async fn main() -> Result<()> {
         } => {
             let job_id = Uuid::new_v4();
             let result: Value = {
-                let client = client.lock().await;
                 client
                     .call(
                         "job.start",
@@ -345,10 +335,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Voices => {
-            let result: Value = {
-                let client = client.lock().await;
-                client.call("tts.list_voices", None).await?
-            };
+            let result: Value = { client.call("tts.list_voices", None).await? };
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }

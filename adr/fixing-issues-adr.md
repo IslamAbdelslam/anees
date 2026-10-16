@@ -88,6 +88,9 @@ that backs our implementation choices.
 - Reader/writer halves must be independently owned; a shared
   `Mutex<Transport>` held across `read_buf().await` deadlocks startup
   (proven on PR #41).
+- `IpcClient` is internally synchronized (`Arc<Mutex<pending>>` inside);
+  an outer `Mutex<IpcClient>` held across `call()` deadlocks for the same
+  reason (proven on Issue #3: ping health check hung). Share bare `Arc`.
 
 ---
 
