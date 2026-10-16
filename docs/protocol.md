@@ -14,6 +14,10 @@ under Conformance.
   UTF-8. Blank lines are ignored.
 - **Ownership**: reader and writer halves are independently owned on both
   sides; never hold a shared lock across a blocking read.
+- **No external lock on the client**: `IpcClient` is internally
+  synchronized. Holding an outer `Mutex<IpcClient>` across `call()` hangs
+  startup: response delivery in the reader task needs the same lock the
+  caller waits on. Share via bare `Arc<IpcClient>`.
 
 ## 2. Messages
 

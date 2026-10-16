@@ -1,6 +1,7 @@
 //! Anees GUI - Main entry point
 
 use anees_core::Result;
+use anees_gui::theme;
 use clap::Parser;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -32,6 +33,7 @@ fn main() -> Result<()> {
     fmt().with_env_filter(filter).init();
 
     tracing::info!("Starting Anees GUI v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Theme primary: {}", theme::PRIMARY_HEX);
 
     if let Some(file) = args.file {
         tracing::info!("Opening file: {}", file);

@@ -1,13 +1,12 @@
 //! Anees CLI - Main entry point
 
 use anees_core::{
-    AneesError, IpcClient, IpcMessage, LogNotification, ProgressNotification, Request, Result,
-    StdioTransport,
+    AneesError, BackendConfig, IpcClient, IpcMessage, LogNotification, ProgressNotification,
+    Request, Result, StdioTransport,
 };
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing_subscriber::{fmt, EnvFilter};
 use uuid::Uuid;
 
@@ -118,9 +117,11 @@ async fn main() -> Result<()> {
     tracing::info!("Starting Anees CLI v{}", env!("CARGO_PKG_VERSION"));
 
     // Start Python backend process
-    let python_cmd = std::env::var("ANEES_PYTHON").unwrap_or_else(|_| "python".to_string());
-    let backend_script = std::env::var("ANEES_BACKEND")
-        .unwrap_or_else(|_| "python-backend/src/anees/server.py".to_string());
+    // Backend location honors ANEES_PYTHON / ANEES_BACKEND, defaulting
+    // to the per-OS stock interpreter (python3 on Unix).
+    let backend_cfg = BackendConfig::from_env();
+    let python_cmd = backend_cfg.python_bin;
+    let backend_script = backend_cfg.backend_script;
 
     let mut child = tokio::process::Command::new(&python_cmd)
         .arg(&backend_script)
@@ -149,20 +150,21 @@ async fn main() -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (notif_tx, mut notif_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let client = Arc::new(Mutex::new(IpcClient::new(tx, notif_tx)));
+    // IpcClient is internally synchronized: share it bare, never hold an
+    // external lock across call()/handle_*() (that deadlocks: response
+    // delivery needs the same lock the caller waits on).
+    let client = Arc::new(IpcClient::new(tx, notif_tx));
 
     // Create transport with child process pipes, then split into
     // independently-owned halves so the reader task never holds a lock
     // across `read_buf().await` while the writer needs to send.
     let transport = StdioTransport::new(stdout, stdin);
     let (mut reader, writer) = transport.split();
-    let writer = Arc::new(Mutex::new(writer));
-
-    let writer_clone = writer.clone();
-
+    // Writer half is owned by its task: single consumer, no lock needed.
     tokio::spawn(async move {
+        let mut writer = writer;
         while let Some(msg) = rx.recv().await {
-            if let Err(e) = writer_clone.lock().await.send(&msg).await {
+            if let Err(e) = writer.send(&msg).await {
                 tracing::error!("Failed to send IPC message: {}", e);
                 break;
             }
@@ -173,26 +175,32 @@ async fn main() -> Result<()> {
     let client_clone = client.clone();
 
     tokio::spawn(async move {
-        while let Ok(Some(msg)) = reader.receive().await {
-            match msg {
-                IpcMessage::Response(resp) => {
-                    client_clone.lock().await.handle_response(resp).await;
+        loop {
+            match reader.receive().await {
+                Ok(Some(msg)) => match msg {
+                    IpcMessage::Response(resp) => {
+                        client_clone.handle_response(resp).await;
+                    }
+                    IpcMessage::Notification(notif) => {
+                        client_clone.handle_notification(notif).await;
+                    }
+                    IpcMessage::Request(Request::Notification { method, params, .. }) => {
+                        client_clone
+                            .handle_notification(anees_core::Notification {
+                                jsonrpc: "2.0".to_string(),
+                                method,
+                                params,
+                            })
+                            .await;
+                    }
+                    _ => {}
+                },
+                // A malformed line must never kill delivery (see BackendManager).
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!("Skipping malformed IPC line: {}", e);
+                    continue;
                 }
-                IpcMessage::Notification(notif) => {
-                    client_clone.lock().await.handle_notification(notif).await;
-                }
-                IpcMessage::Request(Request::Notification { method, params, .. }) => {
-                    client_clone
-                        .lock()
-                        .await
-                        .handle_notification(anees_core::Notification {
-                            jsonrpc: "2.0".to_string(),
-                            method,
-                            params,
-                        })
-                        .await;
-                }
-                _ => {}
             }
         }
     });
@@ -230,12 +238,12 @@ async fn main() -> Result<()> {
 
     // Ping to verify connection
     {
-        let client = client.lock().await;
         match client.call("ping", None).await {
             Ok(_) => tracing::info!("Connected to Python backend"),
             Err(e) => {
                 tracing::error!("Failed to connect to Python backend: {}", e);
                 child.kill().await.ok();
+                child.wait().await.ok();
                 return Err(e);
             }
         }
@@ -245,7 +253,6 @@ async fn main() -> Result<()> {
     let result = match cli.command {
         Commands::Validate { path } => {
             let result: Value = {
-                let client = client.lock().await;
                 client
                     .call("pdf.validate", Some(json!({"path": path})))
                     .await?
@@ -261,10 +268,7 @@ async fn main() -> Result<()> {
             if let Some(l) = langs {
                 params["langs"] = json!(l.split(',').collect::<Vec<_>>());
             }
-            let result: Value = {
-                let client = client.lock().await;
-                client.call("pdf.extract_text", Some(params)).await?
-            };
+            let result: Value = { client.call("pdf.extract_text", Some(params)).await? };
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
@@ -276,16 +280,12 @@ async fn main() -> Result<()> {
             if let Some(l) = langs {
                 params["langs"] = json!(l.split(',').collect::<Vec<_>>());
             }
-            let result: Value = {
-                let client = client.lock().await;
-                client.call("pdf.ocr", Some(params)).await?
-            };
+            let result: Value = { client.call("pdf.ocr", Some(params)).await? };
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
         Commands::Tashkeel { text, mode } => {
             let result: Value = {
-                let client = client.lock().await;
                 client
                     .call(
                         "arabic.add_tashkeel",
@@ -304,7 +304,6 @@ async fn main() -> Result<()> {
             output: _output,
         } => {
             let result: Value = {
-                let client = client.lock().await;
                 client
                     .call(
                         "tts.synthesize",
@@ -326,7 +325,6 @@ async fn main() -> Result<()> {
         } => {
             let job_id = Uuid::new_v4();
             let result: Value = {
-                let client = client.lock().await;
                 client
                     .call(
                         "job.start",
@@ -345,16 +343,14 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Voices => {
-            let result: Value = {
-                let client = client.lock().await;
-                client.call("tts.list_voices", None).await?
-            };
+            let result: Value = { client.call("tts.list_voices", None).await? };
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
     };
 
-    // Shutdown
+    // Shutdown (kill + wait: never leave a zombie).
     child.kill().await.ok();
+    child.wait().await.ok();
     result
 }

@@ -20,3 +20,4 @@ fastrand = { workspace = true }
 num_cpus = { workspace = true }
 tokio = { workspace = true }
 dirs = { workspace = true }
+tracing = { workspace = true }

@@ -3,6 +3,7 @@
 pub mod error;
 pub mod ipc;
 pub mod models;
+pub mod process;
 
 pub use error::{AneesError, Result};
 pub use ipc::{
@@ -11,3 +12,4 @@ pub use ipc::{
     Response, RpcError, StdioReader, StdioTransport, StdioWriter,
 };
 pub use models::*;
+pub use process::{BackendConfig, BackendManager, DEFAULT_PYTHON_BIN};
