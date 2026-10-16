@@ -1,8 +1,8 @@
 //! Anees CLI - Main entry point
 
 use anees_core::{
-    AneesError, Result, IpcClient, StdioTransport, IpcMessage, ProgressNotification, LogNotification,
-    Request,
+    AneesError, IpcClient, IpcMessage, LogNotification, ProgressNotification, Request, Result,
+    StdioTransport,
 };
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -12,7 +12,11 @@ use tracing_subscriber::{fmt, EnvFilter};
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
-#[command(name = "anees-cli", version, about = "Anees - Arabic/English PDF-to-Speech CLI")]
+#[command(
+    name = "anees-cli",
+    version,
+    about = "Anees - Arabic/English PDF-to-Speech CLI"
+)]
 struct Cli {
     /// Enable debug logging
     #[arg(short, long)]
@@ -124,10 +128,10 @@ async fn main() -> Result<()> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| AneesError::Io(e))?;
+        .map_err(AneesError::Io)?;
 
     // Use child process pipes directly: ChildStdout implements AsyncRead, ChildStdin implements AsyncWrite
-    let stdin = child.stdin.take().unwrap();  // implements AsyncWrite
+    let stdin = child.stdin.take().unwrap(); // implements AsyncWrite
     let stdout = child.stdout.take().unwrap(); // implements AsyncRead
     let stderr = child.stderr.take().unwrap();
 
@@ -178,11 +182,15 @@ async fn main() -> Result<()> {
                     client_clone.lock().await.handle_notification(notif).await;
                 }
                 IpcMessage::Request(Request::Notification { method, params, .. }) => {
-                    client_clone.lock().await.handle_notification(anees_core::Notification {
-                        jsonrpc: "2.0".to_string(),
-                        method,
-                        params,
-                    }).await;
+                    client_clone
+                        .lock()
+                        .await
+                        .handle_notification(anees_core::Notification {
+                            jsonrpc: "2.0".to_string(),
+                            method,
+                            params,
+                        })
+                        .await;
                 }
                 _ => {}
             }
@@ -194,12 +202,21 @@ async fn main() -> Result<()> {
         while let Some(notif) = notif_rx.recv().await {
             match notif.method.as_str() {
                 "progress" => {
-                    if let Ok(payload) = serde_json::from_value::<ProgressNotification>(notif.params.unwrap_or_default()) {
-                        println!("[Progress] {}: {}% - {}", payload.stage, (payload.progress * 100.0) as u32, payload.message);
+                    if let Ok(payload) = serde_json::from_value::<ProgressNotification>(
+                        notif.params.unwrap_or_default(),
+                    ) {
+                        println!(
+                            "[Progress] {}: {}% - {}",
+                            payload.stage,
+                            (payload.progress * 100.0) as u32,
+                            payload.message
+                        );
                     }
                 }
                 "log" => {
-                    if let Ok(payload) = serde_json::from_value::<LogNotification>(notif.params.unwrap_or_default()) {
+                    if let Ok(payload) =
+                        serde_json::from_value::<LogNotification>(notif.params.unwrap_or_default())
+                    {
                         println!("[{}] {}", payload.level.to_uppercase(), payload.message);
                     }
                 }
@@ -229,15 +246,21 @@ async fn main() -> Result<()> {
         Commands::Validate { path } => {
             let result: Value = {
                 let client = client.lock().await;
-                client.call("pdf.validate", Some(json!({"path": path}))).await?
+                client
+                    .call("pdf.validate", Some(json!({"path": path})))
+                    .await?
             };
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
         Commands::Extract { path, pages, langs } => {
             let mut params = json!({"path": path});
-            if let Some(p) = pages { params["page_range"] = json!(p); }
-            if let Some(l) = langs { params["langs"] = json!(l.split(',').collect::<Vec<_>>()); }
+            if let Some(p) = pages {
+                params["page_range"] = json!(p);
+            }
+            if let Some(l) = langs {
+                params["langs"] = json!(l.split(',').collect::<Vec<_>>());
+            }
             let result: Value = {
                 let client = client.lock().await;
                 client.call("pdf.extract_text", Some(params)).await?
@@ -247,8 +270,12 @@ async fn main() -> Result<()> {
         }
         Commands::Ocr { path, pages, langs } => {
             let mut params = json!({"path": path});
-            if let Some(p) = pages { params["page_range"] = json!(p); }
-            if let Some(l) = langs { params["langs"] = json!(l.split(',').collect::<Vec<_>>()); }
+            if let Some(p) = pages {
+                params["page_range"] = json!(p);
+            }
+            if let Some(l) = langs {
+                params["langs"] = json!(l.split(',').collect::<Vec<_>>());
+            }
             let result: Value = {
                 let client = client.lock().await;
                 client.call("pdf.ocr", Some(params)).await?
@@ -259,33 +286,59 @@ async fn main() -> Result<()> {
         Commands::Tashkeel { text, mode } => {
             let result: Value = {
                 let client = client.lock().await;
-                client.call("arabic.add_tashkeel", Some(json!({"text": text, "mode": mode}))).await?
+                client
+                    .call(
+                        "arabic.add_tashkeel",
+                        Some(json!({"text": text, "mode": mode})),
+                    )
+                    .await?
             };
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
-        Commands::Tts { text, lang, voice, speed, output: _output } => {
+        Commands::Tts {
+            text,
+            lang,
+            voice,
+            speed,
+            output: _output,
+        } => {
             let result: Value = {
                 let client = client.lock().await;
-                client.call("tts.synthesize", Some(json!({
-                    "text": text, "lang": lang, "voice": voice, "speed": speed
-                }))).await?
+                client
+                    .call(
+                        "tts.synthesize",
+                        Some(json!({
+                            "text": text, "lang": lang, "voice": voice, "speed": speed
+                        })),
+                    )
+                    .await?
             };
             // TODO: Save audio to file
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
-        Commands::Process { path, lang_mode, voice, output } => {
+        Commands::Process {
+            path,
+            lang_mode,
+            voice,
+            output,
+        } => {
             let job_id = Uuid::new_v4();
             let result: Value = {
                 let client = client.lock().await;
-                client.call("job.start", Some(json!({
-                    "job_id": job_id.to_string(),
-                    "pdf_path": path,
-                    "language_mode": lang_mode,
-                    "voice": voice,
-                    "output": output,
-                }))).await?
+                client
+                    .call(
+                        "job.start",
+                        Some(json!({
+                            "job_id": job_id.to_string(),
+                            "pdf_path": path,
+                            "language_mode": lang_mode,
+                            "voice": voice,
+                            "output": output,
+                        })),
+                    )
+                    .await?
             };
             println!("Job started: {}", job_id);
             println!("{}", serde_json::to_string_pretty(&result)?);
