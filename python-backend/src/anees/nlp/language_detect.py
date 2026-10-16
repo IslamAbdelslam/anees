@@ -1,17 +1,18 @@
 """Language detection using fasttext"""
 
+import logging
+from pathlib import Path
+
 import fasttext
 import fasttext.util
-from pathlib import Path
-from typing import List, Optional
+
 from anees.models import LanguageDetection, TextSegment
-import logging
 
 logger = logging.getLogger("anees.lang")
 
 
 class LanguageDetector:
-    def __init__(self, model_path: Optional[str] = None):
+    def __init__(self, model_path: str | None = None):
         # Lazy: do NOT download (126MB) or load the model here, or the
         # RPC server blocks/crashes on startup when offline. Resolved on
         # first use via _ensure_loaded(), or proactively via models.ensure.
@@ -27,8 +28,8 @@ class LanguageDetector:
             self.model_path = path
             self._load_model()
             return self.model is not None
-        except Exception as e:
-            logger.error(f"Language model unavailable (lazy load): {e}")
+        except Exception:
+            logger.exception("Language model unavailable (lazy load)")
             return False
 
     def _get_model_path(self) -> str:
@@ -45,12 +46,8 @@ class LanguageDetector:
 
     def _load_model(self):
         """Load fasttext model"""
-        try:
-            self.model = fasttext.load_model(self.model_path)
-            logger.info("Language detection model loaded")
-        except Exception as e:
-            logger.error(f"Failed to load language model: {e}")
-            raise
+        self.model = fasttext.load_model(self.model_path)
+        logger.info("Language detection model loaded")
 
     def detect(self, text: str) -> LanguageDetection:
         """Detect language of text"""
@@ -93,16 +90,16 @@ class LanguageDetector:
 
             return LanguageDetection(lang=mapped_lang, confidence=confidence)
 
-        except Exception as e:
-            logger.error(f"Language detection failed: {e}")
+        except Exception:
+            logger.exception("Language detection failed")
             return LanguageDetection(lang="unknown", confidence=0.0)
 
-    def detect_batch(self, segments: List[TextSegment]) -> List[LanguageDetection]:
+    def detect_batch(self, segments: list[TextSegment]) -> list[LanguageDetection]:
         """Detect language for multiple segments"""
         return [self.detect(seg.text) for seg in segments]
 
     def _has_arabic(self, text: str) -> bool:
-        return any('\u0600' <= c <= '\u06FF' for c in text)
+        return any("\u0600" <= c <= "\u06ff" for c in text)
 
     def _has_latin(self, text: str) -> bool:
-        return any('a' <= c.lower() <= 'z' for c in text)
+        return any("a" <= c.lower() <= "z" for c in text)

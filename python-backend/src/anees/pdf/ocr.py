@@ -1,28 +1,29 @@
 """OCR Engine using Tesseract with Nougat fallback"""
 
+import logging
+from pathlib import Path
+
+import cv2
+import numpy as np
 import pytesseract
 from pdf2image import convert_from_path
 from PIL import Image
-import numpy as np
-from pathlib import Path
-from typing import List, Optional, Tuple
-import cv2
-from anees.models import TextSegment, ChunkData
-import logging
+
+from anees.models import ChunkData, TextSegment
 
 logger = logging.getLogger("anees.ocr")
 
 
 class OCREngine:
-    def __init__(self, dpi: int = 300, tesseract_path: Optional[str] = None):
+    def __init__(self, dpi: int = 300, tesseract_path: str | None = None):
         self.dpi = dpi
         if tesseract_path:
             pytesseract.pytesseract.tesseract_cmd = tesseract_path
         # Verify tesseract is available
         try:
             pytesseract.get_tesseract_version()
-        except Exception as e:
-            logger.warning(f"Tesseract not found: {e}")
+        except Exception:
+            logger.exception("Tesseract not available")
 
     def preprocess_image(self, image: Image.Image) -> Image.Image:
         """Preprocess image for better Arabic OCR"""
@@ -41,8 +42,7 @@ class OCREngine:
 
         # Binarize using adaptive threshold
         img = cv2.adaptiveThreshold(
-            img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 11, 2
+            img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
         )
 
         return Image.fromarray(img)
@@ -63,16 +63,15 @@ class OCREngine:
             (h, w) = img.shape[:2]
             center = (w // 2, h // 2)
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
-            img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+            img = cv2.warpAffine(
+                img, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
+            )
 
         return img
 
     def process(
-        self,
-        path: str,
-        page_range: Optional[Tuple[int, int]] = None,
-        langs: Optional[List[str]] = None
-    ) -> List[ChunkData]:
+        self, path: str, page_range: tuple[int, int] | None = None, langs: list[str] | None = None
+    ) -> list[ChunkData]:
         """Process PDF pages with OCR"""
         path = Path(path)
         lang_str = "+".join(langs) if langs else "ara+eng"
@@ -82,7 +81,7 @@ class OCREngine:
             path,
             dpi=self.dpi,
             first_page=page_range[0] + 1 if page_range else None,
-            last_page=page_range[1] if page_range else None
+            last_page=page_range[1] if page_range else None,
         )
 
         chunks = []
@@ -99,15 +98,11 @@ class OCREngine:
                 img = self.preprocess_image(img)
 
                 # Run Tesseract
-                custom_config = r'--psm 6 --oem 1'
+                custom_config = r"--psm 6 --oem 1"
                 try:
-                    text = pytesseract.image_to_string(
-                        img,
-                        lang=lang_str,
-                        config=custom_config
-                    )
-                except Exception as e:
-                    logger.error(f"Tesseract error on page {i+1}: {e}")
+                    text = pytesseract.image_to_string(img, lang=lang_str, config=custom_config)
+                except Exception:
+                    logger.exception(f"Tesseract error on page {i + 1}")
                     text = ""
 
                 # Get confidence data
@@ -116,38 +111,45 @@ class OCREngine:
                         img,
                         lang=lang_str,
                         config=custom_config,
-                        output_type=pytesseract.Output.DICT
+                        output_type=pytesseract.Output.DICT,
                     )
-                    confidences = [c for c in data['conf'] if c > 0]
+                    confidences = [c for c in data["conf"] if c > 0]
                     avg_confidence = sum(confidences) / len(confidences) if confidences else 0
                 except Exception:
+                    logger.exception(f"Tesseract confidence query failed on page {i + 1}")
                     avg_confidence = 0
 
                 # Determine language
                 page_text = text.strip()
                 lang = "mixed"
-                if any('\u0600' <= c <= '\u06FF' for c in page_text):
+                if any("\u0600" <= c <= "\u06ff" for c in page_text):
                     lang = "ar"
-                elif any('a' <= c.lower() <= 'z' for c in page_text):
+                elif any("a" <= c.lower() <= "z" for c in page_text):
                     lang = "en"
 
                 # Determine actual page number
                 actual_page = page_range[0] + i + 1 if page_range else i + 1
 
-                chunk_segments.append(TextSegment(
-                    page=actual_page,
-                    text=page_text,
-                    lang=lang,
-                    confidence=avg_confidence / 100.0
-                ))
+                chunk_segments.append(
+                    TextSegment(
+                        page=actual_page,
+                        text=page_text,
+                        lang=lang,
+                        confidence=avg_confidence / 100.0,
+                    )
+                )
 
-            chunks.append(ChunkData(
-                chunk_index=chunk_start // chunk_size,
-                page_range=[page_range[0] + chunk_start + 1 if page_range else chunk_start + 1,
-                           page_range[0] + chunk_end if page_range else chunk_end],
-                segments=chunk_segments,
-                status="completed",
-                progress=1.0
-            ))
+            chunks.append(
+                ChunkData(
+                    chunk_index=chunk_start // chunk_size,
+                    page_range=[
+                        page_range[0] + chunk_start + 1 if page_range else chunk_start + 1,
+                        page_range[0] + chunk_end if page_range else chunk_end,
+                    ],
+                    segments=chunk_segments,
+                    status="completed",
+                    progress=1.0,
+                )
+            )
 
         return chunks
