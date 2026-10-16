@@ -12,4 +12,4 @@ pub use ipc::{
     Response, RpcError, StdioReader, StdioTransport, StdioWriter,
 };
 pub use models::*;
-pub use process::{BackendConfig, BackendManager};
+pub use process::{BackendConfig, BackendManager, DEFAULT_PYTHON_BIN};

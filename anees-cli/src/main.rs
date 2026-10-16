@@ -1,8 +1,8 @@
 //! Anees CLI - Main entry point
 
 use anees_core::{
-    AneesError, IpcClient, IpcMessage, LogNotification, ProgressNotification, Request, Result,
-    StdioTransport,
+    AneesError, BackendConfig, IpcClient, IpcMessage, LogNotification, ProgressNotification,
+    Request, Result, StdioTransport,
 };
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -117,9 +117,11 @@ async fn main() -> Result<()> {
     tracing::info!("Starting Anees CLI v{}", env!("CARGO_PKG_VERSION"));
 
     // Start Python backend process
-    let python_cmd = std::env::var("ANEES_PYTHON").unwrap_or_else(|_| "python".to_string());
-    let backend_script = std::env::var("ANEES_BACKEND")
-        .unwrap_or_else(|_| "python-backend/src/anees/server.py".to_string());
+    // Backend location honors ANEES_PYTHON / ANEES_BACKEND, defaulting
+    // to the per-OS stock interpreter (python3 on Unix).
+    let backend_cfg = BackendConfig::from_env();
+    let python_cmd = backend_cfg.python_bin;
+    let backend_script = backend_cfg.backend_script;
 
     let mut child = tokio::process::Command::new(&python_cmd)
         .arg(&backend_script)

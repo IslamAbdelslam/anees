@@ -25,10 +25,20 @@ use tokio::task::JoinHandle;
 
 use crate::{AneesError, IpcClient, IpcMessage, Notification, Request, Result, StdioTransport};
 
+/// Stock interpreter name: `python3` on Unix (bare `python` rarely
+/// exists there), `python` on Windows.
+#[cfg(not(windows))]
+pub const DEFAULT_PYTHON_BIN: &str = "python3";
+/// Stock interpreter name: `python3` on Unix (bare `python` rarely
+/// exists there), `python` on Windows.
+#[cfg(windows)]
+pub const DEFAULT_PYTHON_BIN: &str = "python";
+
 /// How to find and (re)start the backend.
 #[derive(Debug, Clone)]
 pub struct BackendConfig {
-    /// Python interpreter (default: `$ANEES_PYTHON` or `"python"`).
+    /// Python interpreter (default: `$ANEES_PYTHON`, else the per-OS
+    /// stock binary — `python3` on Unix, `python` on Windows).
     pub python_bin: String,
     /// Backend entrypoint (default: `$ANEES_BACKEND` or
     /// `"python-backend/src/anees/server.py"`).
@@ -48,7 +58,7 @@ pub struct BackendConfig {
 impl Default for BackendConfig {
     fn default() -> Self {
         Self {
-            python_bin: "python".to_string(),
+            python_bin: DEFAULT_PYTHON_BIN.to_string(),
             backend_script: "python-backend/src/anees/server.py".to_string(),
             script_args: Vec::new(),
             models_dir: None,
@@ -380,6 +390,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("child did not exit in time");
+    }
+
+    #[test]
+    fn default_python_matches_stock_os_interpreter() {
+        // Bare `python` rarely exists on Unix (Ubuntu/Debian/macOS ship
+        // only `python3`); Windows is the opposite.
+        #[cfg(not(windows))]
+        assert_eq!(BackendConfig::default().python_bin, "python3");
+        #[cfg(windows)]
+        assert_eq!(BackendConfig::default().python_bin, "python");
     }
 
     #[tokio::test]
