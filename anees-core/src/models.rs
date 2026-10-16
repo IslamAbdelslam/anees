@@ -1,7 +1,7 @@
 //! Shared data models for Anees
 
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// PDF document information
@@ -19,7 +19,7 @@ pub struct PdfInfo {
 pub struct TextSegment {
     pub page: u32,
     pub text: String,
-    pub lang: String,           // "ar", "en", "mixed"
+    pub lang: String, // "ar", "en", "mixed"
     pub confidence: f32,
     pub bbox: Option<[f32; 4]>, // x, y, w, h
 }
@@ -68,9 +68,9 @@ pub struct TtsRequest {
 /// Audio chunk result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioChunk {
-    pub data: Vec<f32>,      // 24kHz samples
+    pub data: Vec<f32>, // 24kHz samples
     pub sample_rate: u32,
-    pub duration: f32,       // seconds
+    pub duration: f32, // seconds
 }
 
 /// Job status

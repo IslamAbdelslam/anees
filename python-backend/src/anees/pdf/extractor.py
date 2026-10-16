@@ -1,10 +1,11 @@
 """PDF text extraction using pdfplumber and PyMuPDF"""
 
+from pathlib import Path
+
 import fitz  # PyMuPDF
 import pdfplumber
-from pathlib import Path
-from typing import List, Optional, Tuple
-from anees.models import PdfInfo, TextSegment, ChunkData
+
+from anees.models import ChunkData, PdfInfo, TextSegment
 
 
 class PDFExtractor:
@@ -29,12 +30,10 @@ class PDFExtractor:
             if text:
                 has_text = True
                 # Simple script detection
-                if any('\u0600' <= c <= '\u06FF' for c in text):
-                    if "ar" not in detected_langs:
-                        detected_langs.append("ar")
-                if any('a' <= c.lower() <= 'z' for c in text):
-                    if "en" not in detected_langs:
-                        detected_langs.append("en")
+                if "ar" not in detected_langs and any("\u0600" <= c <= "\u06ff" for c in text):
+                    detected_langs.append("ar")
+                if "en" not in detected_langs and any("a" <= c.lower() <= "z" for c in text):
+                    detected_langs.append("en")
 
         return PdfInfo(
             pages=len(doc),
@@ -45,11 +44,8 @@ class PDFExtractor:
         )
 
     def extract(
-        self,
-        path: str,
-        page_range: Optional[Tuple[int, int]] = None,
-        langs: Optional[List[str]] = None
-    ) -> List[ChunkData]:
+        self, path: str, page_range: tuple[int, int] | None = None, langs: list[str] | None = None
+    ) -> list[ChunkData]:
         """Extract text from PDF using pdfplumber (layout-aware)"""
         path = Path(path)
         doc = fitz.open(path)
@@ -74,56 +70,62 @@ class PDFExtractor:
                     page = pdf.pages[page_num]
 
                     # Extract with layout preservation
-                    text = page.extract_text(
-                        layout=True,
-                        x_tolerance=2,
-                        y_tolerance=2
-                    ) or ""
+                    text = page.extract_text(layout=True, x_tolerance=2, y_tolerance=2) or ""
 
                     # Get tables
                     tables = page.extract_tables()
                     for table in tables:
                         # Convert table to text representation
-                        table_text = "\n".join(["\t".join(str(cell) if cell else "" for cell in row) for row in table])
+                        table_text = "\n".join(
+                            ["\t".join(str(cell) if cell else "" for cell in row) for row in table]
+                        )
                         text += f"\n[TABLE]\n{table_text}\n[/TABLE]\n"
 
                     # Get bounding boxes for words
-                    words = page.extract_words(
-                        keep_blank_chars=False,
-                        x_tolerance=2,
-                        y_tolerance=2
-                    ) or []
+                    words = (
+                        page.extract_words(keep_blank_chars=False, x_tolerance=2, y_tolerance=2)
+                        or []
+                    )
 
                     # Use pdfplumber's word positions for bbox
                     bbox = None
                     if words:
                         x_coords = [w["x0"] for w in words] + [w["x1"] for w in words]
                         y_coords = [w["top"] for w in words] + [w["bottom"] for w in words]
-                        bbox = [min(x_coords), min(y_coords), max(x_coords) - min(x_coords), max(y_coords) - min(y_coords)]
+                        bbox = [
+                            min(x_coords),
+                            min(y_coords),
+                            max(x_coords) - min(x_coords),
+                            max(y_coords) - min(y_coords),
+                        ]
 
                     # Determine language for this page
                     lang = "mixed"
-                    if any('\u0600' <= c <= '\u06FF' for c in text):
+                    if any("\u0600" <= c <= "\u06ff" for c in text):
                         lang = "ar"
-                    elif any('a' <= c.lower() <= 'z' for c in text):
+                    elif any("a" <= c.lower() <= "z" for c in text):
                         lang = "en"
 
                     if text.strip():
-                        chunk_segments.append(TextSegment(
-                            page=page_num + 1,
-                            text=text.strip(),
-                            lang=lang,
-                            confidence=1.0,
-                            bbox=bbox
-                        ))
+                        chunk_segments.append(
+                            TextSegment(
+                                page=page_num + 1,
+                                text=text.strip(),
+                                lang=lang,
+                                confidence=1.0,
+                                bbox=bbox,
+                            )
+                        )
 
-                chunks.append(ChunkData(
-                    chunk_index=(chunk_start - start) // chunk_size,
-                    page_range=[chunk_start + 1, chunk_end],
-                    segments=chunk_segments,
-                    status="completed",
-                    progress=1.0
-                ))
+                chunks.append(
+                    ChunkData(
+                        chunk_index=(chunk_start - start) // chunk_size,
+                        page_range=[chunk_start + 1, chunk_end],
+                        segments=chunk_segments,
+                        status="completed",
+                        progress=1.0,
+                    )
+                )
 
         return chunks
 
@@ -132,7 +134,7 @@ class PDFChunker:
     def __init__(self, chunk_size: int = 10):
         self.chunk_size = chunk_size
 
-    def split(self, total_pages: int) -> List[Tuple[int, int]]:
+    def split(self, total_pages: int) -> list[tuple[int, int]]:
         """Split pages into chunks"""
         chunks = []
         for start in range(0, total_pages, self.chunk_size):

@@ -1,11 +1,12 @@
 """Arabic text processing using camel-tools"""
 
+import logging
+
 from camel_tools.disambig.mle import MLEDisambiguator
 from camel_tools.tokenizers.word import simple_word_tokenize
 from camel_tools.utils.normalize import normalize_alef_ar, normalize_teh_marbuta
-from typing import List
+
 from anees.models import TashkeelResult
-import logging
 
 logger = logging.getLogger("anees.arabic")
 
@@ -23,18 +24,14 @@ class ArabicProcessor:
         try:
             self._load_model()
             return self.disambiguator is not None
-        except Exception as e:
-            logger.error(f"Arabic model unavailable (lazy load): {e}")
+        except Exception:
+            logger.exception("Arabic model unavailable (lazy load)")
             return False
 
     def _load_model(self):
         """Load camel-tools disambiguator"""
-        try:
-            self.disambiguator = MLEDisambiguator.pretrained()
-            logger.info("Arabic disambiguator loaded")
-        except Exception as e:
-            logger.error(f"Failed to load Arabic model: {e}")
-            raise
+        self.disambiguator = MLEDisambiguator.pretrained()
+        logger.info("Arabic disambiguator loaded")
 
     def add_tashkeel(self, text: str, mode: str = "semantic") -> TashkeelResult:
         """Add diacritics (tashkeel) to Arabic text"""
@@ -53,8 +50,8 @@ class ArabicProcessor:
         # Disambiguate
         try:
             disambig = self.disambiguator.disambiguate(tokens)
-        except Exception as e:
-            logger.error(f"Disambiguation failed: {e}")
+        except Exception:
+            logger.exception("Disambiguation failed")
             return TashkeelResult(text_with_diacritics=text, changes=0)
 
         # Reconstruct with diacritics based on mode
@@ -70,10 +67,11 @@ class ArabicProcessor:
         # Count added diacritics: comparing char-by-char with zip() is wrong
         # because inserting diacritics shifts all subsequent offsets.
         # Instead count diacritic codepoints added vs. the input.
-        DIACRITICS = set('ًٌٍَُِّْٰٕٖٜٟٓٔٗ٘ٙٚٛٞـً')
+        DIACRITICS = set("ًٌٍَُِّْٰٕٖٜٟٓٔٗ٘ٙٚٛٞـً")
+
         # Core Arabic vowel marks U+064B–U+0652 plus common extras
         def _diac_count(s: str) -> int:
-            return sum(1 for c in s if c in DIACRITICS or '\u064b' <= c <= '\u0652')
+            return sum(1 for c in s if c in DIACRITICS or "\u064b" <= c <= "\u0652")
 
         changes = _diac_count(result) - _diac_count(text)
         changes = max(0, changes)
@@ -86,7 +84,7 @@ class ArabicProcessor:
         text = normalize_teh_marbuta(text)
         return text
 
-    def _reconstruct_full(self, disambig: List) -> str:
+    def _reconstruct_full(self, disambig: list) -> str:
         """Full diacritization - all analyses"""
         parts = []
         for d in disambig:
@@ -96,13 +94,13 @@ class ArabicProcessor:
                 parts.append(d.word)
         return " ".join(parts)
 
-    def _reconstruct_semantic(self, disambig: List, tokens: List[str]) -> str:
+    def _reconstruct_semantic(self, disambig: list, tokens: list[str]) -> str:
         """Semantic diacritization - only disambiguate homographs"""
         parts = []
         for i, d in enumerate(disambig):
             if d.analyses:
                 # Check if word has multiple analyses with different diacritics
-                diacritics = set(a.diac for a in d.analyses)
+                diacritics = {a.diac for a in d.analyses}
                 if len(diacritics) > 1:
                     # Homograph - use first analysis
                     parts.append(d.analyses[0].diac)
@@ -113,7 +111,7 @@ class ArabicProcessor:
                 parts.append(tokens[i])
         return " ".join(parts)
 
-    def _reconstruct_endings(self, disambig: List, tokens: List[str]) -> str:
+    def _reconstruct_endings(self, disambig: list, tokens: list[str]) -> str:
         """Endings only - case endings for pausing"""
         parts = []
         for i, d in enumerate(disambig):

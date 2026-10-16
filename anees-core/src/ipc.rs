@@ -140,9 +140,7 @@ impl IpcClient {
 
     /// Send a request and wait for response
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value> {
-        let id = Value::Number(serde_json::Number::from(
-            fastrand::u64(..),
-        ));
+        let id = Value::Number(serde_json::Number::from(fastrand::u64(..)));
         let request = Request::WithId {
             jsonrpc: "2.0".to_string(),
             id: id.clone(),
@@ -157,7 +155,9 @@ impl IpcClient {
             .send(IpcMessage::Request(request))
             .map_err(|_| AneesError::Ipc("Failed to send request".to_string()))?;
 
-        let response = rx.await.map_err(|_| AneesError::Ipc("Request cancelled".to_string()))?;
+        let response = rx
+            .await
+            .map_err(|_| AneesError::Ipc("Request cancelled".to_string()))?;
 
         match response {
             Response::Success { result, .. } => Ok(result),
@@ -362,7 +362,11 @@ pub fn progress_notification(
     total: u32,
     message: String,
 ) -> Result<Notification> {
-    let progress = if total > 0 { chunk as f32 / total as f32 } else { 0.0 };
+    let progress = if total > 0 {
+        chunk as f32 / total as f32
+    } else {
+        0.0
+    };
     notification(
         notifications::PROGRESS,
         ProgressNotification {
@@ -396,7 +400,10 @@ mod tests {
         // Plain JSON-RPC 2.0 from Python has no `type` discriminator.
         let raw = r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#;
         let msg: IpcMessage = serde_json::from_str(raw).expect("response must parse");
-        assert!(matches!(msg, IpcMessage::Response(Response::Success { .. })));
+        assert!(matches!(
+            msg,
+            IpcMessage::Response(Response::Success { .. })
+        ));
     }
 
     #[test]
@@ -408,7 +415,10 @@ mod tests {
             params: None,
         };
         let s = serde_json::to_string(&IpcMessage::Request(req)).unwrap();
-        assert!(!s.contains("\"type\""), "wire format must stay plain JSON-RPC: {s}");
+        assert!(
+            !s.contains("\"type\""),
+            "wire format must stay plain JSON-RPC: {s}"
+        );
     }
 
     #[tokio::test]

@@ -5,7 +5,11 @@ use clap::Parser;
 use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Parser, Debug)]
-#[command(name = "anees-gui", version, about = "Anees - Arabic/English PDF-to-Speech Desktop App")]
+#[command(
+    name = "anees-gui",
+    version,
+    about = "Anees - Arabic/English PDF-to-Speech Desktop App"
+)]
 struct Args {
     /// Enable debug logging
     #[arg(short, long)]

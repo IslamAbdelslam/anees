@@ -5,23 +5,23 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from pydantic import BaseModel
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from anees.pdf.extractor import PDFExtractor, PDFChunker
-from anees.pdf.ocr import OCREngine
-from anees.nlp.language_detect import LanguageDetector
+from anees.export.docx import DOCXExporter
+from anees.export.html import HTMLExporter
+from anees.models import *
 from anees.nlp.arabic import ArabicProcessor
+from anees.nlp.language_detect import LanguageDetector
+from anees.orchestrator import PipelineOrchestrator
+from anees.pdf.extractor import PDFChunker, PDFExtractor
+from anees.pdf.ocr import OCREngine
 from anees.tts.engine import TTSEngine
 from anees.tts.voices import VoiceManager
-from anees.export.html import HTMLExporter
-from anees.export.docx import DOCXExporter
-from anees.orchestrator import PipelineOrchestrator
-from anees.models import *
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,20 +35,20 @@ class JSONRPCRequest(BaseModel):
     jsonrpc: str = "2.0"
     id: Any = None
     method: str
-    params: Optional[Dict[str, Any]] = None
+    params: dict[str, Any] | None = None
 
 
 class JSONRPCResponse(BaseModel):
     jsonrpc: str = "2.0"
     id: Any = None
     result: Any = None
-    error: Optional[Dict[str, Any]] = None
+    error: dict[str, Any] | None = None
 
 
 class JSONRPCNotification(BaseModel):
     jsonrpc: str = "2.0"
     method: str
-    params: Optional[Dict[str, Any]] = None
+    params: dict[str, Any] | None = None
 
 
 class AneesRPCServer:
@@ -93,8 +93,7 @@ class AneesRPCServer:
 
         if method not in self.methods:
             return JSONRPCResponse(
-                id=request.id,
-                error={"code": -32601, "message": f"Method not found: {method}"}
+                id=request.id, error={"code": -32601, "message": f"Method not found: {method}"}
             )
 
         try:
@@ -102,27 +101,24 @@ class AneesRPCServer:
             return JSONRPCResponse(id=request.id, result=result)
         except Exception as e:
             logger.exception(f"Error in method {method}")
-            return JSONRPCResponse(
-                id=request.id,
-                error={"code": -32603, "message": str(e)}
-            )
+            return JSONRPCResponse(id=request.id, error={"code": -32603, "message": str(e)})
 
     async def handle_notification(self, notification: JSONRPCNotification):
         logger.debug(f"Notification: {notification.method}")
 
     # --- Method implementations ---
 
-    async def ping(self, params: Dict) -> Dict:
+    async def ping(self, params: dict) -> dict:
         return {"status": "ok"}
 
-    async def validate_pdf(self, params: Dict) -> Dict:
+    async def validate_pdf(self, params: dict) -> dict:
         path = params.get("path")
         if not path:
             raise ValueError("path is required")
         info = self.extractor.validate(path)
         return info.model_dump()
 
-    async def extract_text(self, params: Dict) -> Dict:
+    async def extract_text(self, params: dict) -> dict:
         path = params.get("path")
         page_range = params.get("page_range")
         langs = params.get("langs", [])
@@ -131,7 +127,7 @@ class AneesRPCServer:
         chunks = self.extractor.extract(path, page_range, langs)
         return {"chunks": [c.model_dump() for c in chunks]}
 
-    async def ocr_pdf(self, params: Dict) -> Dict:
+    async def ocr_pdf(self, params: dict) -> dict:
         path = params.get("path")
         page_range = params.get("page_range")
         langs = params.get("langs", [])
@@ -140,7 +136,7 @@ class AneesRPCServer:
         chunks = self.ocr.process(path, page_range, langs)
         return {"chunks": [c.model_dump() for c in chunks]}
 
-    async def detect_language(self, params: Dict) -> Dict:
+    async def detect_language(self, params: dict) -> dict:
         text = params.get("text")
         segments = params.get("segments")
         if text:
@@ -151,7 +147,7 @@ class AneesRPCServer:
             return {"segments": [r.model_dump() for r in results]}
         raise ValueError("text or segments required")
 
-    async def add_tashkeel(self, params: Dict) -> Dict:
+    async def add_tashkeel(self, params: dict) -> dict:
         text = params.get("text")
         mode = params.get("mode", "semantic")
         if not text:
@@ -159,7 +155,7 @@ class AneesRPCServer:
         result = self.arabic.add_tashkeel(text, mode)
         return result.model_dump()
 
-    async def synthesize_tts(self, params: Dict) -> Dict:
+    async def synthesize_tts(self, params: dict) -> dict:
         text = params.get("text")
         lang = params.get("lang")
         voice = params.get("voice")
@@ -168,40 +164,46 @@ class AneesRPCServer:
             raise ValueError("text, lang, voice required")
         audio = self.tts.synthesize(text, lang, voice, speed)
         import base64
-        return {"audio_base64": base64.b64encode(audio.tobytes()).decode(), "sample_rate": 24000, "duration": len(audio) / 24000}
 
-    async def list_voices(self, params: Dict) -> Dict:
+        return {
+            "audio_base64": base64.b64encode(audio.tobytes()).decode(),
+            "sample_rate": 24000,
+            "duration": len(audio) / 24000,
+        }
+
+    async def list_voices(self, params: dict) -> dict:
         return self.voices.get_catalog()
 
-    async def preview_voice(self, params: Dict) -> Dict:
+    async def preview_voice(self, params: dict) -> dict:
         voice = params.get("voice")
         lang = params.get("lang", "ar")
         if not voice:
             raise ValueError("voice required")
         audio = self.tts.preview(voice, lang)
         import base64
+
         return {"audio_base64": base64.b64encode(audio.tobytes()).decode(), "sample_rate": 24000}
 
-    async def export_html(self, params: Dict) -> Dict:
+    async def export_html(self, params: dict) -> dict:
         chunks = params.get("chunks", [])
         metadata = params.get("metadata", {})
         options = params.get("options", {})
         path = self.html_exporter.export(chunks, metadata, options)
         return {"path": path}
 
-    async def export_docx(self, params: Dict) -> Dict:
+    async def export_docx(self, params: dict) -> dict:
         chunks = params.get("chunks", [])
         metadata = params.get("metadata", {})
         options = params.get("options", {})
         path = self.docx_exporter.export(chunks, metadata, options)
         return {"path": path}
 
-    async def ensure_models(self, params: Dict) -> Dict:
+    async def ensure_models(self, params: dict) -> dict:
         model_names = params.get("models", ["nabra-7m-distill", "kokoro-7m-distill"])
         paths = self.tts.ensure_models(model_names)
         return {"paths": paths}
 
-    async def start_job(self, params: Dict) -> Dict:
+    async def start_job(self, params: dict) -> dict:
         job_id = params.get("job_id")
         pdf_path = params.get("pdf_path")
         language_mode = params.get("language_mode", "auto")
@@ -212,7 +214,7 @@ class AneesRPCServer:
         job = await self.orchestrator.start_job(job_id, pdf_path, language_mode, voice, output)
         return job.to_dict()
 
-    async def job_status(self, params: Dict) -> Dict:
+    async def job_status(self, params: dict) -> dict:
         job_id = params.get("job_id")
         if not job_id:
             raise ValueError("job_id required")
@@ -255,8 +257,8 @@ async def main():
                 await server.handle_notification(notification)
         except json.JSONDecodeError:
             logger.error(f"Invalid JSON: {line}")
-        except Exception as e:
-            logger.exception(f"Error processing request: {e}")
+        except Exception:
+            logger.exception("Error processing request")
 
     writer.close()
     await writer.wait_closed()

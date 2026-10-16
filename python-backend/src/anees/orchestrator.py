@@ -1,13 +1,10 @@
 """Pipeline Orchestrator"""
 
 import asyncio
-import json
-import uuid
+import logging
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any
-from dataclasses import dataclass, asdict
-import logging
 
 logger = logging.getLogger("anees.orchestrator")
 
@@ -17,7 +14,7 @@ class Job:
     job_id: str
     pdf_path: str
     language_mode: str
-    voice: Optional[str]
+    voice: str | None
     output: str
     status: str = "queued"
     progress: float = 0.0
@@ -25,11 +22,11 @@ class Job:
     total_chunks: int = 0
     stage: str = "validation"
     message: str = ""
-    output_path: Optional[str] = None
-    error: Optional[str] = None
+    output_path: str | None = None
+    error: str | None = None
     started_at: str = ""
     updated_at: str = ""
-    chunks: List[Dict] = None
+    chunks: list[dict] = None
 
     def __post_init__(self):
         if not self.started_at:
@@ -39,7 +36,7 @@ class Job:
         if self.chunks is None:
             self.chunks = []
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return asdict(self)
 
 
@@ -59,15 +56,10 @@ class PipelineOrchestrator:
         self.lang_detector = lang_detector
         self.arabic = arabic
         self.tts = tts
-        self.jobs: Dict[str, Job] = {}
+        self.jobs: dict[str, Job] = {}
 
     async def start_job(
-        self,
-        job_id: str,
-        pdf_path: str,
-        language_mode: str,
-        voice: Optional[str],
-        output: str
+        self, job_id: str, pdf_path: str, language_mode: str, voice: str | None, output: str
     ) -> Job:
         job = Job(
             job_id=job_id,
@@ -108,7 +100,7 @@ class PipelineOrchestrator:
             for chunk_idx, (start, end) in enumerate(chunk_ranges):
                 job.current_chunk = chunk_idx
                 job.stage = "extraction"
-                job.message = f"Processing pages {start+1}-{end}"
+                job.message = f"Processing pages {start + 1}-{end}"
                 self._update_progress(job, 0.1 + 0.7 * chunk_idx / job.total_chunks)
 
                 # Extract or OCR
@@ -119,7 +111,7 @@ class PipelineOrchestrator:
 
                 # Language detection
                 job.stage = "language_detection"
-                job.message = f"Detecting languages in chunk {chunk_idx+1}/{job.total_chunks}"
+                job.message = f"Detecting languages in chunk {chunk_idx + 1}/{job.total_chunks}"
                 for chunk in chunks:
                     for seg in chunk.segments:
                         if seg.lang == "mixed":
@@ -129,7 +121,7 @@ class PipelineOrchestrator:
 
                 # Tashkeel for Arabic
                 job.stage = "tashkeel"
-                job.message = f"Adding tashkeel to chunk {chunk_idx+1}/{job.total_chunks}"
+                job.message = f"Adding tashkeel to chunk {chunk_idx + 1}/{job.total_chunks}"
                 for chunk in chunks:
                     for seg in chunk.segments:
                         if seg.lang in ("ar", "mixed"):
@@ -169,21 +161,34 @@ class PipelineOrchestrator:
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Save as WAV first
-            wav_path = output_path.with_suffix('.wav')
+            wav_path = output_path.with_suffix(".wav")
             wavfile.write(str(wav_path), 24000, combined.astype(np.float32))
 
-            # Convert to MP3 using ffmpeg if available
+            # Convert to MP3 using ffmpeg if available (off the event loop)
             try:
                 import subprocess
-                mp3_path = output_path.with_suffix('.mp3')
-                subprocess.run([
-                    'ffmpeg', '-y', '-i', str(wav_path),
-                    '-codec:a', 'libmp3lame', '-b:a', '128k',
-                    str(mp3_path)
-                ], check=True, capture_output=True)
+
+                mp3_path = output_path.with_suffix(".mp3")
+                await asyncio.to_thread(
+                    subprocess.run,
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        str(wav_path),
+                        "-codec:a",
+                        "libmp3lame",
+                        "-b:a",
+                        "128k",
+                        str(mp3_path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
                 job.output_path = str(mp3_path)
                 wav_path.unlink()
             except Exception:
+                logger.exception("ffmpeg MP3 conversion failed; keeping WAV")
                 job.output_path = str(wav_path)
 
             job.status = "completed"
