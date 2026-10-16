@@ -6,8 +6,8 @@ pub mod models;
 
 pub use error::{AneesError, Result};
 pub use ipc::{
-    log_notification, notification, progress_notification, request, IpcClient, IpcMessage,
-    IpcServer, LogNotification, Notification, ProgressNotification, Request, Response, StdioReader,
-    StdioTransport, StdioWriter,
+    log_notification, notification, parse_message, progress_notification, request, ErrorCode,
+    IpcClient, IpcMessage, IpcServer, LogNotification, Notification, ProgressNotification, Request,
+    Response, RpcError, StdioReader, StdioTransport, StdioWriter,
 };
 pub use models::*;
