@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anees"
+version = "0.1.0"
+description = "Anees - Arabic/English PDF-to-Speech Backend"
+readme = "README.md"
+license = {text = "MIT OR Apache-2.0"}
+authors = [{name = "Islam Abdelslam"}]
+requires-python = ">=3.10"
+dependencies = [
+    "pdfplumber>=0.11",
+    "pymupdf>=1.23",
+    "pytesseract>=0.3",
+    "pdf2image>=1.16",
+    "Pillow>=10.0",
+    "opencv-python>=4.8",
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "camel-tools>=1.2",
+    "fasttext>=0.9",
+    "langdetect>=1.0",
+    "onnxruntime>=1.18",
+    "huggingface-hub>=0.22",
+    "soundfile>=0.12",
+    "python-docx>=1.1",
+    "jinja2>=3.1",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-jsonrpc-server>=0.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "ruff>=0.1",
+    "mypy>=1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
