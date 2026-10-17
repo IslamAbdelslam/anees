@@ -89,6 +89,8 @@ and CI is green.
 
 Scope and limits of the grant:
 
+- **Recorded at**: maintainer confirmation on PR #49 (2026-10-18). This
+  runbook is the operative copy; the PR comment is the audit trail.
 - **Revocable at any time**: run `gh issue edit <N> --add-label loop:pause`,
   create `.delegate/STOP`, or just stop the process. Revocation is immediate.
 - **No remote branch deletion.** The grant covers merge only; the driver leaves

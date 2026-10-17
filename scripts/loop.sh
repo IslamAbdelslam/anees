@@ -36,6 +36,7 @@ ADMIN_MERGE="${LOOP_ADMIN_MERGE:-0}"
 DRY_RUN=0
 ONLY_ISSUE=""
 DO_STOP=0
+ONLY_ONCE=0
 
 ORIG_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
 START_EPOCH=$(date +%s)
@@ -64,8 +65,14 @@ EOF
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
-    --only) ONLY_ISSUE="${2:-}"; shift ;;
-    --max-issues) MAX_ISSUES="${2:-0}"; shift ;;
+    --only)
+      [ $# -ge 2 ] || die "--only needs a numeric issue number"
+      case "$2" in ''|*[!0-9]*) die "--only needs a numeric issue number, got '$2'" ;; esac
+      ONLY_ISSUE="$2"; shift ;;
+    --max-issues)
+      [ $# -ge 2 ] || die "--max-issues needs a number"
+      case "$2" in ''|*[!0-9]*) die "--max-issues needs a number, got '$2'" ;; esac
+      MAX_ISSUES="$2"; shift ;;
     --stop) DO_STOP=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1 (use --help)" ;;
@@ -106,20 +113,27 @@ state_set() {
 # ------------------------------------------------------------ selection ----
 all_open_issues() {
   gh issue list --repo "$REPO_SLUG" --state open --limit 200 \
-     --json number,labels \
-     --jq '[.[] | select([.labels[].name] | index("loop:pause") | not)] | sort_by(.number) | .[].number'
+     --json number --jq 'sort_by(.number) | .[].number'
+}
+
+issue_has_label() { # issue label
+  gh issue view "$1" --repo "$REPO_SLUG" --json labels \
+     --jq --arg L "$2" '[.labels[].name] | index($L) != null' 2>/dev/null | grep -q true
 }
 
 issue_is_escalated() {
   local n="$1"
   [ "$(state_get "$n" status)" = "escalated" ] && return 0
-  gh issue view "$n" --repo "$REPO_SLUG" --json labels \
-     --jq '[.labels[].name] | index("loop:needs-human") != null' 2>/dev/null | grep -q true
+  issue_has_label "$n" loop:needs-human
 }
 
 select_next() {
   local n
   for n in $(all_open_issues); do
+    if issue_has_label "$n" loop:pause; then
+      warn "issue #$n is paused (loop:pause); halting selection (never skip an open issue)"
+      return 1
+    fi
     if issue_is_escalated "$n"; then
       log "skipping #$n (escalated, terminal this run)"; continue
     fi
@@ -164,8 +178,8 @@ diff_hash() { git -C "$REPO_ROOT" add -A >/dev/null 2>&1; git -C "$REPO_ROOT" di
 diff_lines() { git -C "$REPO_ROOT" diff --cached --numstat | awk '{a+=$1;d+=$2} END{print a+d+0}'; }
 
 # --------------------------------------------------------------- briefs -----
-make_engineer_brief() { # issue run_dir
-  local n="$1" dir="$2" title
+make_engineer_brief() { # issue run_dir [feedback_file]
+  local n="$1" dir="$2" feedback="${3:-}" title
   title="$(gh issue view "$n" --repo "$REPO_SLUG" --json title --jq .title)"
   {
     printf 'You are the engineer for the Anees repository (working root: %s).\n' "$REPO_ROOT"
@@ -176,6 +190,14 @@ EOF
     gh issue view "$n" --repo "$REPO_SLUG" --json body --jq .body
     cat <<'EOF'
 </issue_body>
+EOF
+    if [ -n "$feedback" ] && [ -f "$feedback" ]; then
+      printf '\n<previous_feedback>\n'
+      printf 'A prior attempt was rejected or failed. Address every point below.\n'
+      cat "$feedback"
+      printf '\n</previous_feedback>\n'
+    fi
+    cat <<'EOF'
 
 <repo_rules>
 - Follow adr/contribution-adr.md and adr/fixing-issues-adr.md (read them).
@@ -239,7 +261,7 @@ EOF
 extract_verdict() { # result.json outfile -> 0 if valid json written
   local result="$1" out="$2"
   jq -r '.finalMessage // ""' "$result" 2>/dev/null \
-    | grep -o 'VERDICT_JSON:.*' | head -1 \
+    | grep -o 'VERDICT_JSON:.*' | tail -1 \
     | sed 's/^VERDICT_JSON:[[:space:]]*//' > "$out"
   jq -e . "$out" >/dev/null 2>&1
 }
@@ -257,17 +279,19 @@ escalate() { # issue run_dir reason
     echo '```'; echo
     echo "Human action needed: review $dir and decide the next step."
   } > "$dir/ESCALATION.md"
-  gh issue edit "$n" --repo "$REPO_SLUG" --add-label loop:needs-human >/dev/null 2>&1 \
-    || gh label create loop:needs-human --repo "$REPO_SLUG" --color B60205 \
-         --description "Loop stopped; needs a human" >/dev/null 2>&1
+  gh label create loop:needs-human --repo "$REPO_SLUG" --color B60205 \
+       --description "Loop stopped; needs a human" >/dev/null 2>&1 || true
+  gh issue edit "$n" --repo "$REPO_SLUG" --add-label loop:needs-human >/dev/null 2>&1 || true
   state_set "$n" status '"escalated"'
   state_set "$n" reason "$(jq -Rn --arg r "$reason" '$r')"
 }
 
-wait_ci() { # pr -> 0 green, 1 red/fail, 2 timeout
-  local pr="$1" waited=0 s
+wait_ci() { # pr [logfile] -> 0 green, 1 red/fail, 2 timeout
+  local pr="$1" logf="${2:-}" waited=0 s
+  [ -n "$logf" ] && : > "$logf"
   while [ "$waited" -lt "$CI_TIMEOUT" ]; do
     s="$(gh pr checks "$pr" --repo "$REPO_SLUG" 2>&1 || true)"
+    [ -n "$logf" ] && printf '%s\n' "$s" >> "$logf"
     if [ -z "$s" ] || printf '%s' "$s" | grep -qiE 'no checks|no commit|not been'; then
       sleep 20; waited=$((waited+20)); continue
     fi
@@ -290,10 +314,16 @@ work_issue() { # n -> 0 landed, 1 escalated
   local branch="issue-$n-$slug"
 
   log "=== issue #$n: $title ==="
-  git -C "$REPO_ROOT" fetch origin "$BASE_BRANCH" --quiet || true
   git -C "$REPO_ROOT" checkout "$BASE_BRANCH" --quiet 2>/dev/null || die "cannot checkout $BASE_BRANCH"
+  git -C "$REPO_ROOT" fetch origin "$BASE_BRANCH" --quiet || true
   git -C "$REPO_ROOT" reset --hard "origin/$BASE_BRANCH" --quiet
-  git -C "$REPO_ROOT" checkout -B "$branch" --quiet
+  if git -C "$REPO_ROOT" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+    log "resuming existing branch $branch from origin (no history reset)"
+    git -C "$REPO_ROOT" fetch origin "$branch" --quiet || true
+    git -C "$REPO_ROOT" checkout -B "$branch" "origin/$branch" --quiet
+  else
+    git -C "$REPO_ROOT" checkout -B "$branch" "origin/$BASE_BRANCH" --quiet
+  fi
 
   local cycle=0 prev_hash="" prev_sig=""
   while :; do
@@ -303,18 +333,41 @@ work_issue() { # n -> 0 landed, 1 escalated
     if [ $(( $(date +%s) - START_EPOCH )) -ge "$MAX_WALL_SECONDS" ]; then warn "wall-clock budget hit"; return 1; fi
     [ "$cycle" -ge "$MAX_FIX_CYCLES" ] && { escalate "$n" "$dir" "max fix cycles ($MAX_FIX_CYCLES) reached"; return 1; }
 
-    # ---- engineer ----
-    make_engineer_brief "$n" "$dir"
-    local edir="$dir/engineer-$cycle"; mkdir -p "$edir"
-    if [ "$cycle" -eq 0 ]; then
-      node "$RELAY" --brief "$dir/brief-engineer.txt" --lane build --cd "$REPO_ROOT" \
-        --timeout "$ENGINEER_TIMEOUT" --out-dir "$edir"
-    else
-      node "$RELAY" --brief "$dir/brief-engineer.txt" --lane build --cd "$REPO_ROOT" \
-        --timeout "$ENGINEER_TIMEOUT" --out-dir "$edir" --resume-last
+    # ---- engineer (with prior feedback on fix cycles) ----
+    local feedback=""
+    if [ "$cycle" -gt 0 ]; then
+      feedback="$dir/feedback-$cycle.txt"
+      {
+        echo "## Reviewer findings"
+        jq -r '(.findings // [])[] | "- [\(.severity)] \(.file): \(.issue) => \(.fix)"' "$dir/verdict.json" 2>/dev/null || true
+        echo
+        if [ -f "$dir/review-$((cycle-1))/result.json" ]; then
+          echo "## Reviewer report (tail)"
+          jq -r '.finalMessage // ""' "$dir/review-$((cycle-1))/result.json" 2>/dev/null | tail -c 4000 || true
+          echo
+        fi
+        if [ -f "$dir/gates-$((cycle-1)).txt" ]; then
+          echo "## Last gate output (tail)"
+          tail -40 "$dir/gates-$((cycle-1)).txt" || true
+          echo
+        fi
+        if [ -f "$dir/ci-$((cycle-1)).txt" ]; then
+          echo "## Last CI output (tail)"
+          tail -40 "$dir/ci-$((cycle-1)).txt" || true
+        fi
+      } > "$feedback"
     fi
+    make_engineer_brief "$n" "$dir" "$feedback"
+    local edir="$dir/engineer-$cycle"; mkdir -p "$edir"
+    local -a erelay=(--brief "$dir/brief-engineer.txt" --lane build --cd "$REPO_ROOT"
+                     --timeout "$ENGINEER_TIMEOUT" --out-dir "$edir")
+    if [ "$cycle" -gt 0 ] && [ -s "$dir/engineer-session.txt" ]; then
+      erelay+=(--session "$(cat "$dir/engineer-session.txt")")
+    fi
+    node "$RELAY" "${erelay[@]}"
     ENGINEER_RUNS=$((ENGINEER_RUNS+1))
     [ -f "$edir/result.json" ] || { escalate "$n" "$dir" "engineer produced no result.json"; return 1; }
+    jq -r '.sessionId // empty' "$edir/result.json" > "$dir/engineer-session.txt"
 
     # ---- progress guards ----
     local cur_hash; cur_hash="$(diff_hash)"
@@ -344,16 +397,19 @@ work_issue() { # n -> 0 landed, 1 escalated
     git -C "$REPO_ROOT" commit -q -m "$msg
 
 Refs #$n"
-    git -C "$REPO_ROOT" push -u origin "$branch" --force-with-lease --quiet
+    if ! git -C "$REPO_ROOT" push -u origin "$branch" --quiet; then
+      escalate "$n" "$dir" "git push failed for branch $branch (refusing to review an unpushed head)"
+      return 1
+    fi
 
     local pr; pr="$(gh pr view "$branch" --repo "$REPO_SLUG" --json number --jq .number 2>/dev/null)"
     if [ -z "$pr" ]; then
       gh pr create --repo "$REPO_SLUG" --base "$BASE_BRANCH" --head "$branch" \
         --title "[#$n] $title" \
-        --body "Implements #$n
+        --body "Fixes #$n
 
 Automated by scripts/loop.sh (engineer: $ENGINEER_MODEL; reviewer: $REVIEWER_MODEL).
-Diff: $lines changed lines." >/dev/null
+Diff: $lines changed lines (cycle $cycle)." >/dev/null
       pr="$(gh pr view "$branch" --repo "$REPO_SLUG" --json number --jq .number)"
     fi
     log "#$n PR #$pr (cycle $cycle, $lines lines)"
@@ -383,7 +439,7 @@ Diff: $lines changed lines." >/dev/null
 
     # ---- CI + merge ----
     log "waiting for CI on PR #$pr"
-    wait_ci "$pr"; local ci=$?
+    wait_ci "$pr" "$dir/ci-$cycle.txt"; local ci=$?
     if [ "$ci" -eq 1 ]; then warn "CI red on #$n"; cycle=$((cycle+1)); continue; fi
     if [ "$ci" -eq 2 ]; then escalate "$n" "$dir" "CI timed out"; return 1; fi
 
@@ -393,6 +449,12 @@ Diff: $lines changed lines." >/dev/null
     gh pr merge "$pr" --repo "$REPO_SLUG" --squash $mflag \
       --body "Squash-merge #$n (engineer: $ENGINEER_MODEL, review: $REVIEWER_MODEL)." >/dev/null \
       || { escalate "$n" "$dir" "auto-merge failed"; return 1; }
+
+    # ensure the issue is closed (Fixes #N should close it; fall back if not)
+    if [ "$(gh issue view "$n" --repo "$REPO_SLUG" --json state --jq .state 2>/dev/null)" != "CLOSED" ]; then
+      gh issue close "$n" --repo "$REPO_SLUG" \
+        --comment "Landed via PR #$pr (auto-closed as a fallback)." >/dev/null 2>&1 || true
+    fi
 
     log "LANDED #$n via PR #$pr"
     state_set "$n" status '"merged"'
@@ -426,12 +488,13 @@ while :; do
   if [ "$ENGINEER_RUNS" -ge "$MAX_ENGINEER_RUNS" ]; then warn "engineer budget reached"; break; fi
 
   if [ -n "$ONLY_ISSUE" ]; then
-    N="$ONLY_ISSUE"; ONLY_ISSUE=""
+    N="$ONLY_ISSUE"; ONLY_ISSUE=""; ONLY_ONCE=1
   else
     N="$(select_next)" || { log "queue empty; done"; break; }
   fi
 
   if work_issue "$N"; then :; else warn "issue #$N not landed (continued)"; fi
+  [ "$ONLY_ONCE" = 1 ] && { log "--only was set; stopping after issue #$N"; break; }
 done
 
 # restore caller's branch if it still exists
