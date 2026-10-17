@@ -117,8 +117,8 @@ all_open_issues() {
 }
 
 issue_has_label() { # issue label
-  gh issue view "$1" --repo "$REPO_SLUG" --json labels \
-     --jq --arg L "$2" '[.labels[].name] | index($L) != null' 2>/dev/null | grep -q true
+  gh issue view "$1" --repo "$REPO_SLUG" --json labels --jq '[.labels[].name]' 2>/dev/null \
+    | jq -e --arg L "$2" 'index($L) != null' >/dev/null 2>&1
 }
 
 issue_is_escalated() {
