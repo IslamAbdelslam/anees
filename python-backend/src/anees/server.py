@@ -18,7 +18,8 @@ from anees.models import *
 from anees.nlp.arabic import ArabicProcessor
 from anees.nlp.language_detect import LanguageDetector
 from anees.orchestrator import PipelineOrchestrator
-from anees.pdf.extractor import PDFChunker, PDFExtractor
+from anees.pdf.chunker import PDFChunker
+from anees.pdf.extractor import PDFExtractor
 from anees.pdf.ocr import OCREngine, resolve_tesseract_path, resolve_traineddata_dir
 from anees.tts.engine import TTSEngine
 from anees.tts.voices import VoiceManager
@@ -75,6 +76,7 @@ class AneesRPCServer:
             self.lang_detector,
             self.arabic,
             self.tts,
+            on_progress=self.emit_progress,
         )
         self.methods = {
             "pdf.validate": self.validate_pdf,
