@@ -40,7 +40,7 @@ def _run_session(lines: list[str], timeout: int = 120) -> list[dict]:
     return [json.loads(line) for line in out.splitlines() if line.strip()]
 
 
-def test_live_protocol_conformance():
+def test_live_protocol_conformance() -> None:
     responses = _run_session(
         [
             '{"jsonrpc": "2.0", "id": 1, "method": "ping"}\n',

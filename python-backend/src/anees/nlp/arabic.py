@@ -1,6 +1,7 @@
 """Arabic text processing using camel-tools"""
 
 import logging
+from typing import Any
 
 from camel_tools.disambig.mle import MLEDisambiguator
 from camel_tools.tokenizers.word import simple_word_tokenize
@@ -12,11 +13,11 @@ logger = logging.getLogger("anees.arabic")
 
 
 class ArabicProcessor:
-    def __init__(self):
+    def __init__(self) -> None:
         # Lazy: do NOT load camel-tools models in __init__, or the RPC
         # server blocks/crashes on startup when offline. Loaded on first
         # use via _ensure_loaded().
-        self.disambiguator = None
+        self.disambiguator: Any = None
 
     def _ensure_loaded(self) -> bool:
         if self.disambiguator is not None:
@@ -28,7 +29,7 @@ class ArabicProcessor:
             logger.exception("Arabic model unavailable (lazy load)")
             return False
 
-    def _load_model(self):
+    def _load_model(self) -> None:
         """Load camel-tools disambiguator"""
         self.disambiguator = MLEDisambiguator.pretrained()
         logger.info("Arabic disambiguator loaded")

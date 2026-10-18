@@ -2,9 +2,10 @@
 
 import asyncio
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("anees.orchestrator")
 
@@ -26,15 +27,13 @@ class Job:
     error: str | None = None
     started_at: str = ""
     updated_at: str = ""
-    chunks: list[dict] = None
+    chunks: list[dict] = field(default_factory=list)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.started_at:
             self.started_at = datetime.now().isoformat()
         if not self.updated_at:
             self.updated_at = datetime.now().isoformat()
-        if self.chunks is None:
-            self.chunks = []
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -43,13 +42,13 @@ class Job:
 class PipelineOrchestrator:
     def __init__(
         self,
-        extractor,
-        ocr,
-        chunker,
-        lang_detector,
-        arabic,
-        tts,
-    ):
+        extractor: Any,
+        ocr: Any,
+        chunker: Any,
+        lang_detector: Any,
+        arabic: Any,
+        tts: Any,
+    ) -> None:
         self.extractor = extractor
         self.ocr = ocr
         self.chunker = chunker
@@ -79,7 +78,7 @@ class PipelineOrchestrator:
             raise KeyError(f"Job not found: {job_id}")
         return self.jobs[job_id]
 
-    async def _process_job(self, job: Job):
+    async def _process_job(self, job: Job) -> None:
         try:
             job.status = "processing"
             job.updated_at = datetime.now().isoformat()
@@ -204,6 +203,6 @@ class PipelineOrchestrator:
             job.message = f"Failed: {e}"
             job.updated_at = datetime.now().isoformat()
 
-    def _update_progress(self, job: Job, progress: float):
+    def _update_progress(self, job: Job, progress: float) -> None:
         job.progress = max(0.0, min(1.0, progress))
         job.updated_at = datetime.now().isoformat()

@@ -29,7 +29,7 @@ class HTMLExporter:
             lstrip_blocks=True,
         )
 
-    def _create_default_template(self, path: Path):
+    def _create_default_template(self, path: Path) -> None:
         template = """<!DOCTYPE html>
 <html dir="{{ rtl|yesno('rtl,ltr') }}" lang="{{ lang }}">
 <head>

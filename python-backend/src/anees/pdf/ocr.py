@@ -73,12 +73,12 @@ class OCREngine:
         self, path: str, page_range: tuple[int, int] | None = None, langs: list[str] | None = None
     ) -> list[ChunkData]:
         """Process PDF pages with OCR"""
-        path = Path(path)
+        pdf_path = Path(path)
         lang_str = "+".join(langs) if langs else "ara+eng"
 
         # Convert PDF pages to images
         images = convert_from_path(
-            path,
+            pdf_path,
             dpi=self.dpi,
             first_page=page_range[0] + 1 if page_range else None,
             last_page=page_range[1] if page_range else None,
