@@ -70,7 +70,7 @@ reply to a notification.**
 | `pdf.validate` | `{"path": str}` | `PdfInfo` |
 | `pdf.extract_text` | `{"path": str, "page_range"?: str, "langs"?: str[]}` | `{"chunks": ChunkData[]}` |
 | `pdf.ocr` | same as extract | `{"chunks": ChunkData[]}` |
-| `lang.detect` | `{"text": str}` or `{"segments": TextSegment[]}` | `{"segments": LanguageDetection[]}` |
+| `lang.detect` | `{"text": str}` or `{"segments": [{"text": str, "page"?: int}]}` | `{"segments": [{"text": str, "page": int, "lang": "ar"\|"en"\|"mixed", "confidence": float, "needs_review": bool}]}` |
 | `arabic.add_tashkeel` | `{"text": str, "mode"?: "full"\|"semantic"\|"endings"}` | `TashkeelResult` |
 | `tts.synthesize` | `{"text": str, "lang": str, "voice": str, "speed"?: float}` | `{"audio_base64": str, "sample_rate": 24000, "duration": float}` |
 | `tts.list_voices` | — | voice catalog `{lang: {id: VoiceInfo}}` |

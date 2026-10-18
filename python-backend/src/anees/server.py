@@ -198,13 +198,11 @@ class AneesRPCServer:
     async def detect_language(self, params: dict) -> dict:
         text = params.get("text")
         segments = params.get("segments")
-        if text:
-            result = self.lang_detector.detect(text)
-            return {"segments": [result.model_dump()]}
-        elif segments:
-            results = self.lang_detector.detect_batch(segments)
-            return {"segments": [r.model_dump() for r in results]}
-        raise ValueError("text or segments required")
+        if text is not None:
+            segments = [{"text": text, "page": 1}]
+        if not segments:
+            raise ValueError("text or segments required")
+        return {"segments": self.lang_detector.detect_segments(segments)}
 
     async def add_tashkeel(self, params: dict) -> dict:
         text = params.get("text")
