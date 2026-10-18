@@ -24,3 +24,4 @@ fastrand = { workspace = true }
 num_cpus = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+ureq = { workspace = true }
