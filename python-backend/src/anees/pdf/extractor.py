@@ -9,10 +9,9 @@ import fitz  # PyMuPDF
 import pdfplumber
 
 from anees.models import ChunkData, PdfInfo, TextSegment
+from anees.pdf.chunker import CHUNK_SIZE
 
 logger = logging.getLogger("anees.pdf.extractor")
-
-CHUNK_SIZE = 10
 
 
 def _character_script(char: str) -> str:
@@ -436,16 +435,3 @@ class PDFExtractor:
                     )
                 )
         return segments, bboxes
-
-
-class PDFChunker:
-    def __init__(self, chunk_size: int = 10):
-        self.chunk_size = chunk_size
-
-    def split(self, total_pages: int) -> list[tuple[int, int]]:
-        """Split pages into chunks"""
-        chunks = []
-        for start in range(0, total_pages, self.chunk_size):
-            end = min(start + self.chunk_size, total_pages)
-            chunks.append((start, end))
-        return chunks
