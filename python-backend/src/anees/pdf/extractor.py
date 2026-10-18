@@ -161,16 +161,21 @@ class PDFExtractor:
                     segments: list[TextSegment] = []
                     for page_num in range(chunk_start, chunk_end):
                         fitz_page = doc[page_num]
-                        if self._is_simple_page(fitz_page):
-                            fitz_words: Any = fitz_page
+                        fitz_words = self._fitz_words(fitz_page)
+                        if self._is_simple_page(fitz_page, fitz_words):
+                            page_words = fitz_words
                             pdf_page: Any = None
+                            page_width = float(fitz_page.rect.width)
                         else:
                             if pdf is None:
                                 pdf = pdfplumber.open(pdf_path)
-                            fitz_words = None
                             pdf_page = pdf.pages[page_num]
+                            page_words = self._pdfplumber_words(pdf_page)
+                            page_width = float(pdf_page.width)
                         segments.extend(
-                            self._page_segments(fitz_words, pdf_page, page_num + 1, lang_filter)
+                            self._page_segments(
+                                page_words, pdf_page, page_width, page_num + 1, lang_filter
+                            )
                         )
                     chunks.append(
                         ChunkData(
@@ -194,15 +199,62 @@ class PDFExtractor:
         end = min(total, int(page_range[1]))
         return start, end
 
-    def _is_simple_page(self, page: Any) -> bool:
+    def _is_simple_page(self, page: Any, words: list[dict[str, Any]] | None = None) -> bool:
         """A page is simple when it has no vector graphics and a single column"""
         if page.get_drawings():
             return False
-        blocks = [b for b in page.get_text("blocks") if b[6] == 0 and b[4].strip()]
-        if len(blocks) <= 1:
+        if words is None:
+            words = self._fitz_words(page)
+        if not words:
             return True
-        lefts = sorted(float(b[0]) for b in blocks)
-        return (lefts[-1] - lefts[0]) < float(page.rect.width) * 0.4
+        return len(self._detect_columns(words, float(page.rect.width))) <= 1
+
+    def _detect_columns(
+        self, words: list[dict[str, Any]], page_width: float
+    ) -> list[tuple[float, float]]:
+        """Split a page into x-bands separated by vertical whitespace gutters"""
+        if not words:
+            return [(0.0, page_width)]
+        left = min(w["x0"] for w in words)
+        right = max(w["x1"] for w in words)
+        span = right - left
+        if span <= 0:
+            return [(left, right)]
+
+        bins = int(span) + 1
+        coverage = [0] * bins
+        for word in words:
+            start = max(0, int(word["x0"] - left))
+            end = min(bins - 1, int(word["x1"] - left))
+            for index in range(start, end + 1):
+                coverage[index] += 1
+
+        min_gutter = max(15.0, span * 0.025)
+        bands: list[tuple[float, float]] = []
+        band_start = left
+        run_start = None
+        for index in range(bins):
+            if coverage[index] == 0:
+                if run_start is None:
+                    run_start = index
+            elif run_start is not None:
+                if index - run_start >= min_gutter:
+                    boundary = left + (run_start + index) / 2
+                    bands.append((band_start, boundary))
+                    band_start = boundary
+                run_start = None
+        bands.append((band_start, right))
+        return bands
+
+    def _column_index(self, center: float, bands: list[tuple[float, float]]) -> int:
+        for index in range(len(bands) - 1):
+            if center < bands[index][1]:
+                return index
+        return len(bands) - 1
+
+    @staticmethod
+    def _column_rank(index: int, count: int, rtl: bool) -> int:
+        return count - 1 - index if rtl else index
 
     def _fitz_words(self, page: Any) -> list[dict[str, Any]]:
         words = []
@@ -241,29 +293,45 @@ class PDFExtractor:
         ]
 
     def _page_segments(
-        self, fitz_page: Any, pdf_page: Any, page_num: int, lang_filter: set[str]
+        self,
+        words: list[dict[str, Any]],
+        pdf_page: Any,
+        page_width: float,
+        page_num: int,
+        lang_filter: set[str],
     ) -> list[TextSegment]:
-        if fitz_page is not None:
-            words = self._fitz_words(fitz_page)
-        else:
-            words = self._pdfplumber_words(pdf_page)
-
-        items: list[tuple[float, list[TextSegment]]] = []
-
+        table_spans: list[TextSegment] = []
         if pdf_page is not None:
             table_spans, table_bboxes = self._table_spans(pdf_page, page_num)
             if table_bboxes:
                 words = [w for w in words if not any(_center_inside(w, b) for b in table_bboxes)]
-            for span in table_spans:
-                bbox = span.bbox
-                items.append((bbox[1] if bbox else 0.0, [span]))
 
+        bands = self._detect_columns(words, page_width)
         page_lang = self._dominant_lang(words)
-        for line in self._group_lines(words):
-            spans = self._line_spans(line, page_lang, page_num)
-            tops = [s.bbox[1] for s in spans if s.bbox]
-            if tops:
-                items.append((min(tops), spans))
+        rtl = page_lang == "ar"
+        count = len(bands)
+
+        items: list[tuple[tuple[int, float], list[TextSegment]]] = []
+
+        for span in table_spans:
+            bbox = span.bbox
+            if bbox is None:
+                continue
+            index = self._column_index(bbox[0] + bbox[2] / 2, bands)
+            items.append(((self._column_rank(index, count, rtl), bbox[1]), [span]))
+
+        column_words: dict[int, list[dict[str, Any]]] = {index: [] for index in range(count)}
+        for word in words:
+            center = (word["x0"] + word["x1"]) / 2
+            column_words[self._column_index(center, bands)].append(word)
+
+        for index in range(count):
+            rank = self._column_rank(index, count, rtl)
+            for line in self._group_lines(column_words[index]):
+                spans = self._line_spans(line, page_lang, page_num)
+                tops = [s.bbox[1] for s in spans if s.bbox]
+                if tops:
+                    items.append(((rank, min(tops)), spans))
 
         items.sort(key=lambda item: item[0])
 

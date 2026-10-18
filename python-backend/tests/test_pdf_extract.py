@@ -19,12 +19,16 @@ pytest.importorskip("pdfplumber")
 
 from anees.pdf.extractor import PDFExtractor
 
-try:
-    import anees.server  # noqa: F401
-
-    _HAS_SERVER = True
-except ImportError:
-    _HAS_SERVER = False
+SERVER_DEPENDENCIES = (
+    "docx",
+    "jinja2",
+    "camel_tools",
+    "fasttext",
+    "onnxruntime",
+    "cv2",
+    "pytesseract",
+    "pdf2image",
+)
 
 
 def _make_text_pdf(path: Path, pages: list[str]) -> None:
@@ -50,6 +54,17 @@ def _make_table_pdf(path: Path) -> None:
     doc.close()
 
 
+def _make_two_column_pdf(path: Path) -> None:
+    doc = fitz.open()
+    page = doc.new_page()
+    for index in range(3):
+        y = 100 + index * 20
+        page.insert_text((72, y), f"L{index + 1}")
+        page.insert_text((320, y), f"R{index + 1}")
+    doc.save(str(path))
+    doc.close()
+
+
 def _word(text: str, x0: float, x1: float, top: float = 100.0, bottom: float = 112.0) -> dict:
     return {"text": text, "x0": x0, "x1": x1, "top": top, "bottom": bottom, "height": bottom - top}
 
@@ -71,6 +86,23 @@ def test_extract_returns_segments_with_bbox_and_lang(tmp_path: Path) -> None:
     assert len(bbox) == 4
     assert bbox[2] > 0
     assert bbox[3] > 0
+
+
+def test_extract_output_matches_rpc_contract(tmp_path: Path) -> None:
+    path = tmp_path / "contract.pdf"
+    _make_text_pdf(path, ["Contract shape check"])
+
+    result = {"chunks": [c.model_dump() for c in PDFExtractor().extract(str(path))]}
+
+    chunk = result["chunks"][0]
+    assert {"page_range", "segments"} <= set(chunk)
+    segment = chunk["segments"][0]
+    assert {"page", "text", "lang", "bbox"} <= set(segment)
+    assert segment["page"] == 1
+    assert segment["lang"] == "en"
+    assert len(segment["bbox"]) == 4
+    assert segment["bbox"][2] > 0
+    assert segment["bbox"][3] > 0
 
 
 def test_page_range_is_zero_based_and_output_pages_one_based(tmp_path: Path) -> None:
@@ -116,10 +148,14 @@ def test_simple_page_detection(tmp_path: Path) -> None:
     _make_text_pdf(simple, ["plain text"])
     table = tmp_path / "table.pdf"
     _make_table_pdf(table)
+    two_column = tmp_path / "two-col.pdf"
+    _make_two_column_pdf(two_column)
 
     with fitz.open(simple) as doc:
         assert PDFExtractor()._is_simple_page(doc[0]) is True
     with fitz.open(table) as doc:
+        assert PDFExtractor()._is_simple_page(doc[0]) is False
+    with fitz.open(two_column) as doc:
         assert PDFExtractor()._is_simple_page(doc[0]) is False
 
 
@@ -132,6 +168,16 @@ def test_table_page_uses_layout_aware_extraction(tmp_path: Path) -> None:
     texts = [s.text for c in chunks for s in c.segments]
     assert any("Name" in t and "Age" in t for t in texts)
     assert any("Ali" in t for t in texts)
+
+
+def test_two_column_page_reads_column_major(tmp_path: Path) -> None:
+    path = tmp_path / "two-col.pdf"
+    _make_two_column_pdf(path)
+
+    chunks = PDFExtractor().extract(str(path))
+
+    texts = [s.text for c in chunks for s in c.segments]
+    assert texts == ["L1", "L2", "L3", "R1", "R2", "R3"]
 
 
 def test_rtl_line_reads_right_to_left() -> None:
@@ -152,8 +198,9 @@ def test_bidi_line_splits_into_script_spans() -> None:
     assert [s.text for s in spans] == ["Hello", "مرحبا", "World"]
 
 
-@pytest.mark.skipif(not _HAS_SERVER, reason="backend dependencies missing")
 def test_extract_text_rpc_contract(tmp_path: Path) -> None:
+    for module in SERVER_DEPENDENCIES:
+        pytest.importorskip(module)
     from anees.server import AneesRPCServer
 
     path = tmp_path / "en.pdf"

@@ -16,12 +16,16 @@ build/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+uv.lock
 
 # Models & data (downloaded at runtime)
 models/
 *.onnx
 *.pt
 *.bin
+
+# Generated at runtime by the HTML exporter
+python-backend/src/anees/export/templates/
 
 # IDE & editors
 .vscode/
