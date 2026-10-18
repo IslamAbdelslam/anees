@@ -59,6 +59,46 @@ Separation of duties is what makes the approve/merge gate meaningful.
 - Reviewer verdict is APPROVE **with evidence** (commands actually run).
 - PR CI green on the exact head commit.
 
+## 3B. Model continuity & context-window rotation
+
+A lane can hit its context window mid-issue. A **continuity keeper** is built
+into the driver so the loop never stalls on that.
+
+**Researched free-tier coding models** (coding-lane rankings, Oct 2026 — see
+[opencode.ai/data](https://opencode.ai/data/compare/deepseek/glm),
+[benchlm.ai](https://benchlm.ai/compare/deepseek-v4-1-flash-vs-glm-5),
+[vals.ai](https://www.vals.ai/models/deepseek_deepseek-v4.1-flash),
+[benchlm.ai/models/nemotron-3-ultra](https://benchlm.ai/models/nemotron-3-ultra)):
+
+| Model (free) | Coding signal | Context |
+|---|---|---|
+| `opencode/deepseek-v4.1-flash-free` | coding lane 60.7 (#18/150); #1 open-weight on code migration | 1M |
+| `opencode/glm-5.3-flash-free` | strong, cheap; 1M ctx | 1M |
+| `opencode/nemotron-3-ultra-free` | SWE-bench Verified 71.9%, LiveCodeBench v6 89% | ~262K |
+
+Default rotation pool: `ROTATION_MODELS="opencode/deepseek-v4.1-flash-free
+opencode/glm-5.3-flash-free opencode/nemotron-3-ultra-free"`.
+
+**Two triggers rotate to the next free model:**
+
+1. **Run did not complete** (failure / timeout / unavailable): rotate and start
+   a **fresh session** (no `--session`), up to `MAX_ROTATIONS` (default 2).
+2. **Context window ≥ 95%** (`CTX_ROTATE_PCT`, default 95): after a run, the
+   driver reads the last `step_finish` token total from the run's `events.jsonl`
+   and divides by the model's window (`context_window_for`). At or above the
+   threshold it rotates to another free model and clears the engineer session,
+   so the next run starts with an empty window. This is proactive — the switch
+   happens **before** the window fills.
+
+**Separation is preserved:** `advance_model` never returns the model the other
+lane is currently using, so the engineer and reviewer never converge on one
+model.
+
+Context windows are mapped per model (`context_window_for`); override the
+unknown-model default with `DEFAULT_CONTEXT_WINDOW`.
+
+---
+
 ## 4. Anti-infinite-loop guards
 
 These are the reason this loop terminates. Every one is enforced in the driver.
@@ -73,6 +113,8 @@ These are the reason this loop terminates. Every one is enforced in the driver.
 | `MAX_ISSUES` | 0 (all) | stop cleanly after N landed issues |
 | `MAX_WALL_SECONDS` | 43200 (12h) | stop cleanly |
 | `MAX_ENGINEER_RUNS` | 120 | stop cleanly |
+| `MAX_ROTATIONS` | 2 | stop rotating; escalate the issue |
+| `CTX_ROTATE_PCT` | 95 | rotate to another free model + fresh context |
 | Kill switch | — | `.delegate/STOP` file present → stop before next dispatch |
 | Escalation is terminal | on | a `loop:needs-human` issue is never re-picked in the same run |
 

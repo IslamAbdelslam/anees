@@ -41,7 +41,18 @@ ONLY_ONCE=0
 ORIG_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
 START_EPOCH=$(date +%s)
 ENGINEER_RUNS=0
+REVIEWER_RUNS=0
 LANDED=0
+
+# Model continuity: when a lane's context window is exhausted (a run fails or a
+# fresh model is needed), rotate to the next-best free coding model. Ordered by
+# the coding-lane benchmarks researched in docs/loop-runbook.md.
+ROTATION_MODELS=(${ROTATION_MODELS:-opencode/deepseek-v4.1-flash-free opencode/glm-5.3-flash-free opencode/nemotron-3-ultra-free})
+MAX_ROTATIONS="${MAX_ROTATIONS:-2}"
+CTX_ROTATE_PCT="${CTX_ROTATE_PCT:-95}"          # rotate before the window fills
+DEFAULT_CONTEXT_WINDOW="${DEFAULT_CONTEXT_WINDOW:-1000000}"
+CUR_ENGINEER=""
+CUR_REVIEWER=""
 
 log()  { printf '\033[1;36m[loop]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[loop]\033[0m %s\n' "$*" >&2; }
@@ -59,6 +70,7 @@ Options:
   -h, --help           This help.
 Env dials: MAX_FIX_CYCLES MAX_ISSUES MAX_WALL_SECONDS MAX_ENGINEER_RUNS
            CI_TIMEOUT ENGINEER_TIMEOUT REVIEW_TIMEOUT LOOP_ADMIN_MERGE
+           ROTATION_MODELS MAX_ROTATIONS CTX_ROTATE_PCT DEFAULT_CONTEXT_WINDOW
 EOF
 }
 
@@ -97,6 +109,8 @@ REVIEWER_MODEL="$(jq -r '.lanes.review.model // empty' "$CONFIG_FILE")"
 [ -n "$ENGINEER_MODEL" ] || die "lane 'build' has no model"
 [ -n "$REVIEWER_MODEL" ] || die "lane 'review' has no model"
 [ "$ENGINEER_MODEL" != "$REVIEWER_MODEL" ] || die "reviewer model must differ from engineer model"
+CUR_ENGINEER="$ENGINEER_MODEL"
+CUR_REVIEWER="$REVIEWER_MODEL"
 
 mkdir -p "$RUNS_DIR"
 [ -f "$STATE_FILE" ] || printf '{"issues":{}}\n' > "$STATE_FILE"
@@ -111,8 +125,17 @@ state_set() {
 }
 
 # ------------------------------------------------------------ selection ----
+gh_json() { # retry transient gh failures so a network blip can't fake a result
+  local attempt=0
+  while [ "$attempt" -lt 3 ]; do
+    if "$@" 2>/dev/null; then return 0; fi
+    attempt=$((attempt+1)); [ "$attempt" -lt 3 ] && sleep 3
+  done
+  return 1
+}
+
 all_open_issues() {
-  gh issue list --repo "$REPO_SLUG" --state open --limit 200 \
+  gh_json gh issue list --repo "$REPO_SLUG" --state open --limit 200 \
      --json number --jq 'sort_by(.number) | .[].number'
 }
 
@@ -127,12 +150,18 @@ issue_is_escalated() {
   issue_has_label "$n" loop:needs-human
 }
 
+SELECT_REASON="queue empty"
 select_next() {
-  local n
-  for n in $(all_open_issues); do
+  SELECT_REASON="queue empty"
+  local list n
+  if ! list="$(all_open_issues)"; then
+    SELECT_REASON="gh issue list failed after retries"
+    warn "$SELECT_REASON"; return 1
+  fi
+  for n in $list; do
     if issue_has_label "$n" loop:pause; then
-      warn "issue #$n is paused (loop:pause); halting selection (never skip an open issue)"
-      return 1
+      SELECT_REASON="halted at paused issue #$n (loop:pause)"
+      warn "$SELECT_REASON"; return 1
     fi
     if issue_is_escalated "$n"; then
       log "skipping #$n (escalated, terminal this run)"; continue
@@ -140,6 +169,89 @@ select_next() {
     printf '%s\n' "$n"; return 0
   done
   return 1
+}
+
+# ------------------------------------------------------ model rotation ------
+context_window_for() { # model -> token window
+  case "$1" in
+    *nemotron-3-ultra*)          echo 262144 ;;
+    *nemotron-3.5-lightning*)    echo 262144 ;;
+    *nemotron-3.5-super-vl*)     echo 262144 ;;
+    *glm*|*deepseek*)            echo 1000000 ;;
+    *)                           echo "$DEFAULT_CONTEXT_WINDOW" ;;
+  esac
+}
+
+ctx_pct() { # result.json -> integer percent of the context window used, or non-zero if unknown
+  local rj="$1" ev tok ctx
+  ev="$(jq -r '.eventsPath // empty' "$rj" 2>/dev/null)"
+  [ -n "$ev" ] && [ -f "$ev" ] || return 1
+  tok="$(jq -s '[.[] | select(.type=="step_finish")] | last | .part.tokens
+                 | (.total // ((.input // 0) + ((.cache.read) // 0)))' "$ev" 2>/dev/null)"
+  case "$tok" in ''|null) return 1 ;; esac
+  ctx="$(context_window_for "$(jq -r '.model // empty' "$rj" 2>/dev/null)")"
+  awk -v t="$tok" -v c="$ctx" 'BEGIN { if (c > 0) printf "%d", (t * 100) / c; else exit 1 }'
+}
+
+advance_model() { # current other -> next rotation model that is not `other`
+  local cur="$1" other="$2" i=-1 idx=0 m n j cand
+  n=${#ROTATION_MODELS[@]}
+  for m in "${ROTATION_MODELS[@]}"; do
+    [ "$m" = "$cur" ] && { i=$idx; break; }
+    idx=$((idx+1))
+  done
+  for ((j=1; j<=n; j++)); do
+    cand="${ROTATION_MODELS[$(((i+j)%n))]}"
+    [ "$cand" != "$other" ] && { printf '%s' "$cand"; return 0; }
+  done
+  printf '%s' "$cur"
+}
+
+run_engineer() { # brief outdir sessionfile -> 0 if a run completed
+  local brief="$1" outdir="$2" sfile="$3" attempt=0
+  while :; do
+    local -a a=(--brief "$brief" --lane build --model "$CUR_ENGINEER" --cd "$REPO_ROOT"
+                 --timeout "$ENGINEER_TIMEOUT" --out-dir "$outdir")
+    [ -s "$sfile" ] && a+=(--session "$(cat "$sfile")")
+    node "$RELAY" "${a[@]}"
+    ENGINEER_RUNS=$((ENGINEER_RUNS+1))
+    if [ -f "$outdir/result.json" ] && [ "$(jq -r '.status // empty' "$outdir/result.json")" = "completed" ]; then
+      jq -r '.sessionId // empty' "$outdir/result.json" > "$sfile"
+      local pct
+      if pct="$(ctx_pct "$outdir/result.json")" && [ -n "$pct" ] && [ "$pct" -ge "$CTX_ROTATE_PCT" ]; then
+        warn "engineer context at ${pct}% (>= ${CTX_ROTATE_PCT}%); rotating to another free model + fresh context"
+        CUR_ENGINEER="$(advance_model "$CUR_ENGINEER" "$CUR_REVIEWER")"
+        : > "$sfile"
+      fi
+      return 0
+    fi
+    [ "$attempt" -ge "$MAX_ROTATIONS" ] && return 1
+    warn "engineer run not completed; rotating model away from $CUR_ENGINEER (fresh context)"
+    CUR_ENGINEER="$(advance_model "$CUR_ENGINEER" "$CUR_REVIEWER")"
+    : > "$sfile"; attempt=$((attempt+1))
+  done
+}
+
+run_reviewer() { # brief outdir verdictout -> 0 if a parseable verdict was produced
+  local brief="$1" outdir="$2" vout="$3" attempt=0
+  while :; do
+    local -a a=(--brief "$brief" --lane review --model "$CUR_REVIEWER" --read-only
+                --cd "$REPO_ROOT" --timeout "$REVIEW_TIMEOUT" --out-dir "$outdir")
+    node "$RELAY" "${a[@]}"
+    REVIEWER_RUNS=$((REVIEWER_RUNS+1))
+    if [ -f "$outdir/result.json" ] && extract_verdict "$outdir/result.json" "$vout"; then
+      local pct
+      if pct="$(ctx_pct "$outdir/result.json")" && [ -n "$pct" ] && [ "$pct" -ge "$CTX_ROTATE_PCT" ]; then
+        warn "reviewer context at ${pct}% (>= ${CTX_ROTATE_PCT}%); next review uses another free model"
+        CUR_REVIEWER="$(advance_model "$CUR_REVIEWER" "$CUR_ENGINEER")"
+      fi
+      return 0
+    fi
+    [ "$attempt" -ge "$MAX_ROTATIONS" ] && return 1
+    warn "reviewer verdict unavailable; rotating model away from $CUR_REVIEWER"
+    CUR_REVIEWER="$(advance_model "$CUR_REVIEWER" "$CUR_ENGINEER")"
+    attempt=$((attempt+1))
+  done
 }
 
 # ------------------------------------------------------------------ gates ---
@@ -359,15 +471,10 @@ work_issue() { # n -> 0 landed, 1 escalated
     fi
     make_engineer_brief "$n" "$dir" "$feedback"
     local edir="$dir/engineer-$cycle"; mkdir -p "$edir"
-    local -a erelay=(--brief "$dir/brief-engineer.txt" --lane build --cd "$REPO_ROOT"
-                     --timeout "$ENGINEER_TIMEOUT" --out-dir "$edir")
-    if [ "$cycle" -gt 0 ] && [ -s "$dir/engineer-session.txt" ]; then
-      erelay+=(--session "$(cat "$dir/engineer-session.txt")")
+    if ! run_engineer "$dir/brief-engineer.txt" "$edir" "$dir/engineer-session.txt"; then
+      escalate "$n" "$dir" "engineer failed after $MAX_ROTATIONS model rotation(s)"
+      return 1
     fi
-    node "$RELAY" "${erelay[@]}"
-    ENGINEER_RUNS=$((ENGINEER_RUNS+1))
-    [ -f "$edir/result.json" ] || { escalate "$n" "$dir" "engineer produced no result.json"; return 1; }
-    jq -r '.sessionId // empty' "$edir/result.json" > "$dir/engineer-session.txt"
 
     # ---- progress guards ----
     local cur_hash; cur_hash="$(diff_hash)"
@@ -419,13 +526,12 @@ Diff: $lines changed lines (cycle $cycle)." >/dev/null
     # ---- independent review ----
     make_review_brief "$n" "$dir" "$dir/diff-$cycle.patch" "$crit"
     local rdir="$dir/review-$cycle"; mkdir -p "$rdir"
-    node "$RELAY" --brief "$dir/brief-review.txt" --lane review --read-only \
-      --cd "$REPO_ROOT" --timeout "$REVIEW_TIMEOUT" --out-dir "$rdir"
-    if ! [ -f "$rdir/result.json" ] || ! extract_verdict "$rdir/result.json" "$dir/verdict.json"; then
-      escalate "$n" "$dir" "reviewer produced no parseable verdict"; return 1
+    if ! run_reviewer "$dir/brief-review.txt" "$rdir" "$dir/verdict.json"; then
+      escalate "$n" "$dir" "reviewer produced no parseable verdict after $MAX_ROTATIONS rotation(s)"
+      return 1
     fi
     local verdict; verdict="$(verdict_field "$dir/verdict.json" .verdict)"
-    issue_comment "$n" "Review (cycle $cycle): **$verdict** by $REVIEWER_MODEL. $(jq -c '.findings // []' "$dir/verdict.json")"
+    issue_comment "$n" "Review (cycle $cycle): **$verdict** by $CUR_REVIEWER. $(jq -c '.findings // []' "$dir/verdict.json")"
 
     if [ "$verdict" != "APPROVE" ]; then
       warn "review: $verdict (cycle $cycle)"
@@ -472,6 +578,7 @@ issue_comment() {
 [ "$DRY_RUN" = 1 ] && {
   log "dry-run: engineer=$ENGINEER_MODEL reviewer=$REVIEWER_MODEL"
   log "guards: max_fix_cycles=$MAX_FIX_CYCLES max_issues=$MAX_ISSUES wall=${MAX_WALL_SECONDS}s engineer_runs=$MAX_ENGINEER_RUNS"
+  log "rotation: models=${ROTATION_MODELS[*]} rotate_at>=${CTX_ROTATE_PCT}% max_rotations=$MAX_ROTATIONS"
   if [ -n "$ONLY_ISSUE" ]; then log "would work issue #$ONLY_ISSUE"
   else
     n="$(select_next)" && log "next issue: #$n" || log "no eligible open issue"
@@ -490,7 +597,7 @@ while :; do
   if [ -n "$ONLY_ISSUE" ]; then
     N="$ONLY_ISSUE"; ONLY_ISSUE=""; ONLY_ONCE=1
   else
-    N="$(select_next)" || { log "queue empty; done"; break; }
+    N="$(select_next)" || { log "${SELECT_REASON:-queue empty}; done"; break; }
   fi
 
   if work_issue "$N"; then :; else warn "issue #$N not landed (continued)"; fi
@@ -500,6 +607,6 @@ done
 # restore caller's branch if it still exists
 git -C "$REPO_ROOT" checkout "$ORIG_BRANCH" --quiet 2>/dev/null || true
 
-log "finished: landed=$LANDED engineer_runs=$ENGINEER_RUNS state=$STATE_FILE"
+log "finished: landed=$LANDED engineer_runs=$ENGINEER_RUNS reviewer_runs=$REVIEWER_RUNS state=$STATE_FILE"
 [ -f "$STOP_FILE" ] && log "STOP switch is set at $STOP_FILE (remove it to resume)"
 exit 0
