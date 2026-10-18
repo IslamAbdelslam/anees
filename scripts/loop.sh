@@ -188,7 +188,7 @@ ctx_pct() { # result.json -> integer percent of the context window used, or non-
   [ -n "$ev" ] && [ -f "$ev" ] || return 1
   tok="$(jq -s '[.[] | select(.type=="step_finish")] | last | .part.tokens
                  | (.total // ((.input // 0) + ((.cache.read) // 0)))' "$ev" 2>/dev/null)"
-  case "$tok" in ''|null) return 1 ;; esac
+  case "$tok" in ''|null|0) return 1 ;; esac
   ctx="$(context_window_for "$(jq -r '.model // empty' "$rj" 2>/dev/null)")"
   awk -v t="$tok" -v c="$ctx" 'BEGIN { if (c > 0) printf "%d", (t * 100) / c; else exit 1 }'
 }
@@ -530,8 +530,11 @@ Diff: $lines changed lines (cycle $cycle)." >/dev/null
       escalate "$n" "$dir" "reviewer produced no parseable verdict after $MAX_ROTATIONS rotation(s)"
       return 1
     fi
-    local verdict; verdict="$(verdict_field "$dir/verdict.json" .verdict)"
-    issue_comment "$n" "Review (cycle $cycle): **$verdict** by $CUR_REVIEWER. $(jq -c '.findings // []' "$dir/verdict.json")"
+    local verdict reviewer_used
+    verdict="$(verdict_field "$dir/verdict.json" .verdict)"
+    reviewer_used="$(jq -r '.model // empty' "$rdir/result.json" 2>/dev/null)"
+    [ -n "$reviewer_used" ] || reviewer_used="$CUR_REVIEWER"
+    issue_comment "$n" "Review (cycle $cycle): **$verdict** by $reviewer_used. $(jq -c '.findings // []' "$dir/verdict.json")"
 
     if [ "$verdict" != "APPROVE" ]; then
       warn "review: $verdict (cycle $cycle)"
