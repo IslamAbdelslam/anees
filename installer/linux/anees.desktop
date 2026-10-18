@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Anees
+Name[ar]=أنيس
+GenericName=PDF-to-Speech
+Comment=Convert Arabic and English PDFs to natural speech
+Exec=anees-gui --file %f
+Icon=anees-gui
+Terminal=false
+Categories=Office;
+MimeType=application/pdf;
+Keywords=PDF;Arabic;English;OCR;TTS;Speech;

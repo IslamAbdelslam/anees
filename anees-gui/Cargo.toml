@@ -7,6 +7,15 @@ repository = { workspace = true }
 authors = { workspace = true }
 description = "Anees GUI application (egui)"
 
+[[bin]]
+name = "anees-gui"
+path = "src/main.rs"
+
+[package.metadata.appimage]
+icon = "../installer/linux/anees-gui.png"
+desktop_entry = "../installer/linux/anees.desktop"
+assets = ["../python-backend"]
+
 [dependencies]
 anees-core = { path = "../anees-core" }
 anyhow = { workspace = true }
