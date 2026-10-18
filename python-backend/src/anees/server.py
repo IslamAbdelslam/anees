@@ -56,7 +56,7 @@ class JSONRPCNotification(BaseModel):
 class AneesRPCServer:
     def __init__(self) -> None:
         self.extractor = PDFExtractor()
-        self.ocr = OCREngine()
+        self.ocr = OCREngine(extractor=self.extractor)
         self.chunker = PDFChunker()
         self.lang_detector = LanguageDetector()
         self.arabic = ArabicProcessor()
@@ -175,7 +175,18 @@ class AneesRPCServer:
         langs = params.get("langs", [])
         if not path:
             raise ValueError("path is required")
-        chunks = self.ocr.process(path, page_range, langs)
+        loop = asyncio.get_running_loop()
+
+        def on_progress(page: int, total: int, message: str) -> None:
+            future = asyncio.run_coroutine_threadsafe(
+                self.emit_progress("ocr", page, total, message), loop
+            )
+            try:
+                future.result()
+            except Exception:
+                logger.exception("Failed to emit OCR progress notification")
+
+        chunks = await asyncio.to_thread(self.ocr.process, path, page_range, langs, on_progress)
         return {"chunks": [c.model_dump() for c in chunks]}
 
     async def detect_language(self, params: dict) -> dict:
