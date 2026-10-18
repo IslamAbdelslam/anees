@@ -19,7 +19,7 @@ from anees.nlp.arabic import ArabicProcessor
 from anees.nlp.language_detect import LanguageDetector
 from anees.orchestrator import PipelineOrchestrator
 from anees.pdf.extractor import PDFChunker, PDFExtractor
-from anees.pdf.ocr import OCREngine
+from anees.pdf.ocr import OCREngine, resolve_tesseract_path, resolve_traineddata_dir
 from anees.tts.engine import TTSEngine
 from anees.tts.voices import VoiceManager
 
@@ -56,7 +56,11 @@ class JSONRPCNotification(BaseModel):
 class AneesRPCServer:
     def __init__(self) -> None:
         self.extractor = PDFExtractor()
-        self.ocr = OCREngine(extractor=self.extractor)
+        self.ocr = OCREngine(
+            extractor=self.extractor,
+            tesseract_path=resolve_tesseract_path(),
+            traineddata_dir=resolve_traineddata_dir(),
+        )
         self.chunker = PDFChunker()
         self.lang_detector = LanguageDetector()
         self.arabic = ArabicProcessor()

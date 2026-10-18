@@ -6,6 +6,8 @@ environments (CI installs only ruff + pytest).
 """
 
 import logging
+import os
+import shlex
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -21,9 +23,33 @@ TESSERACT_CONFIG = "--psm 6 --oem 1"
 OCR_CONFIDENCE_THRESHOLD = 0.6
 MIN_EMBEDDED_CHARS = 100
 
+PACKAGE_DIR = Path(__file__).resolve().parent
+BUNDLED_TESSDATA = PACKAGE_DIR / "tessdata"
+BUNDLED_TESSERACT = PACKAGE_DIR / "bin" / ("tesseract.exe" if os.name == "nt" else "tesseract")
+
 LANG_CODES = {"ar": "ara", "en": "eng", "fa": "fas", "fr": "fra", "de": "deu"}
 
 ProgressCallback = Callable[[int, int, str], None]
+
+
+def resolve_tesseract_path(explicit: str | None = None) -> str | None:
+    """Explicit path wins; else ``$ANEES_TESSERACT``; else a bundled static binary."""
+    if explicit:
+        return explicit
+    env = os.environ.get("ANEES_TESSERACT")
+    if env:
+        return env
+    return str(BUNDLED_TESSERACT) if BUNDLED_TESSERACT.is_file() else None
+
+
+def resolve_traineddata_dir(explicit: str | None = None) -> str | None:
+    """Explicit dir wins; else ``$ANEES_TESSDATA``; else the bundled tessdata dir."""
+    if explicit:
+        return explicit
+    env = os.environ.get("ANEES_TESSDATA")
+    if env:
+        return env
+    return str(BUNDLED_TESSDATA) if BUNDLED_TESSDATA.is_dir() else None
 
 
 def tesseract_lang(langs: Sequence[str] | None) -> str:
@@ -82,11 +108,14 @@ class NougatEngine:
 
         processor, model = self._load()
         pixel_values = processor(image, return_tensors="pt").pixel_values
+        # Cap generation below the decoder's positional-embedding table, or
+        # degenerate pages overflow it (IndexError in position embeddings).
+        max_positions = int(getattr(model.config.decoder, "max_position_embeddings", 1024))
         with torch.no_grad():
             outputs = model.generate(
                 pixel_values,
                 min_length=1,
-                max_new_tokens=4096,
+                max_new_tokens=max(1, max_positions - 2),
                 bad_words_ids=[[processor.tokenizer.unk_token_id]],
             )
         sequence = processor.batch_decode(outputs, skip_special_tokens=True)[0]
@@ -112,12 +141,12 @@ class OCREngine:
         traineddata_dir: str | None = None,
     ) -> None:
         self.dpi = dpi
-        self.tesseract_path = tesseract_path
+        self.tesseract_path = resolve_tesseract_path(tesseract_path)
         self.extractor = extractor
         self.nougat = nougat if nougat is not None else NougatEngine()
         self.confidence_threshold = confidence_threshold
         self.min_embedded_chars = min_embedded_chars
-        self.traineddata_dir = traineddata_dir
+        self.traineddata_dir = resolve_traineddata_dir(traineddata_dir)
         self._tesseract_checked = False
         self._nougat_available_cache: bool | None = None
 
@@ -146,25 +175,28 @@ class OCREngine:
 
         img = self._deskew(img)
         img = cv2.fastNlMeansDenoising(img, h=10)
-        img = cv2.adaptiveThreshold(
-            img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-        )
+        _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         return Image.fromarray(img)
 
-    def _deskew(self, img: Any) -> Any:
+    def _skew_angle(self, img: Any) -> float:
         import cv2
         import numpy as np
 
-        coords = np.column_stack(np.where(img > 0))
+        coords = np.column_stack(np.where(img < 128))
         if len(coords) < 10:
-            return img
+            return 0.0
 
         angle = cv2.minAreaRect(coords)[-1]
         if angle < -45:
             angle = -(90 + angle)
         else:
             angle = -angle
+        return float(angle)
 
+    def _deskew(self, img: Any) -> Any:
+        import cv2
+
+        angle = self._skew_angle(img)
         if abs(angle) > 0.5:
             (h, w) = img.shape[:2]
             center = (w // 2, h // 2)
@@ -204,7 +236,7 @@ class OCREngine:
         self._ensure_tesseract()
         config = TESSERACT_CONFIG
         if self.traineddata_dir:
-            config = f"--tessdata-dir {self.traineddata_dir} {config}"
+            config = f"--tessdata-dir {shlex.quote(self.traineddata_dir)} {config}"
 
         text = pytesseract.image_to_string(image, lang=lang, config=config)
         try:

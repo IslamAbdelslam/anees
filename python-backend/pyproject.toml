@@ -41,12 +41,17 @@ dev = [
     "mypy>=1.0",
 ]
 nougat = [
-    "transformers>=4.40",
+    "transformers>=4.40,<5",
     "torch>=2.2",
+    "nltk>=3.8",
+    "python-Levenshtein>=0.24",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"anees.pdf" = ["bin/*", "tessdata/*"]
 
 [tool.ruff]
 line-length = 100

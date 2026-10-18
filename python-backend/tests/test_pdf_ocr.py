@@ -20,7 +20,13 @@ fitz = pytest.importorskip("fitz")
 pytest.importorskip("pdfplumber")
 
 from anees.models import ChunkData, TextSegment
-from anees.pdf.ocr import OCREngine, tesseract_lang
+from anees.pdf.ocr import (
+    NougatEngine,
+    OCREngine,
+    resolve_tesseract_path,
+    resolve_traineddata_dir,
+    tesseract_lang,
+)
 
 SERVER_DEPENDENCIES = (
     "docx",
@@ -33,9 +39,13 @@ SERVER_DEPENDENCIES = (
     "pdf2image",
 )
 
-ARABIC_FONT_CANDIDATES = [
+LATIN_FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+
+ARABIC_FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
 ]
 
 
@@ -54,20 +64,25 @@ def _text_pdf(path: Path, text: str) -> None:
     doc.close()
 
 
-def _scanned_pdf(path: Path, text: str) -> None:
+def _scanned_pdf(
+    path: Path,
+    text: str,
+    font_candidates: list[str] = LATIN_FONT_CANDIDATES,
+    size: tuple[int, int] = (1400, 300),
+) -> None:
     from PIL import Image, ImageDraw, ImageFont
 
-    font_path = next((p for p in ARABIC_FONT_CANDIDATES if Path(p).exists()), None)
+    font_path = next((p for p in font_candidates if Path(p).exists()), None)
     if font_path is None:
         pytest.skip("no TrueType font available to render the scanned page")
     font = ImageFont.truetype(font_path, 64)
-    image = Image.new("RGB", (1400, 300), "white")
+    image = Image.new("RGB", size, "white")
     ImageDraw.Draw(image).text((40, 90), text, fill="black", font=font)
     png = path.with_suffix(".png")
     image.save(png)
 
     doc = fitz.open()
-    page = doc.new_page(width=1400, height=300)
+    page = doc.new_page(width=size[0], height=size[1])
     page.insert_image(page.rect, filename=str(png))
     doc.save(str(path))
     doc.close()
@@ -253,3 +268,80 @@ def test_ocr_rpc_contract(tmp_path: Path) -> None:
     chunk = result["chunks"][0]
     assert chunk["page_range"] == [1, 1]
     assert chunk["segments"][0]["page"] == 1
+
+
+def test_resolve_assets_prefers_explicit_then_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    assert resolve_traineddata_dir(str(tmp_path)) == str(tmp_path)
+    assert resolve_tesseract_path("/opt/tesseract") == "/opt/tesseract"
+
+    monkeypatch.setenv("ANEES_TESSDATA", "/custom/tessdata")
+    monkeypatch.setenv("ANEES_TESSERACT", "/custom/tesseract")
+    assert resolve_traineddata_dir() == "/custom/tessdata"
+    assert resolve_tesseract_path() == "/custom/tesseract"
+
+
+def test_deskew_corrects_skewed_scan() -> None:
+    cv2 = pytest.importorskip("cv2")
+    numpy = pytest.importorskip("numpy")
+    engine = OCREngine()
+
+    image = numpy.full((300, 600), 255, dtype=numpy.uint8)
+    for y in range(60, 240, 40):
+        cv2.line(image, (50, y), (550, y), 0, 3)
+    rotation = cv2.getRotationMatrix2D((300, 150), 7.0, 1.0)
+    skewed = cv2.warpAffine(image, rotation, (600, 300), borderValue=255)
+
+    before = abs(engine._skew_angle(skewed))
+    after = abs(engine._skew_angle(engine._deskew(skewed)))
+
+    assert before > 3.0
+    assert after < 1.0
+
+
+def _has_traineddata(code: str) -> bool:
+    directory = resolve_traineddata_dir()
+    if directory and (Path(directory) / f"{code}.traineddata").is_file():
+        return True
+    import pytesseract
+
+    try:
+        return code in pytesseract.get_languages(config="")
+    except (pytesseract.TesseractError, OSError):
+        return False
+
+
+def test_scanned_pdf_arabic(tmp_path: Path) -> None:
+    pytest.importorskip("cv2")
+    pytest.importorskip("pytesseract")
+    pytest.importorskip("pdf2image")
+    if not _has_traineddata("ara"):
+        pytest.skip("Tesseract 'ara' traineddata is not installed")
+
+    path = tmp_path / "arabic.pdf"
+    _scanned_pdf(path, "مرحبا بالعالم", font_candidates=ARABIC_FONT_CANDIDATES)
+
+    segment = OCREngine().process(str(path), langs=["ar", "en"])[0].segments[0]
+
+    assert segment.lang == "ar"
+    assert "مرحبا" in segment.text
+
+
+def test_nougat_integration_when_optional_extra_installed() -> None:
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    from PIL import Image, ImageDraw, ImageFont
+
+    engine = NougatEngine()
+    assert engine.is_available()
+
+    font_path = next((p for p in LATIN_FONT_CANDIDATES if Path(p).exists()), None)
+    if font_path is None:
+        pytest.skip("no TrueType font available to render a page")
+    page = Image.new("RGB", (896, 300), "white")
+    ImageDraw.Draw(page).text(
+        (40, 90), "Hello Nougat World", fill="black", font=ImageFont.truetype(font_path, 64)
+    )
+
+    assert isinstance(engine.process(page), str)

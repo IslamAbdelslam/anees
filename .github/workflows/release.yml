@@ -25,7 +25,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
-            file wget
+            file wget gcc g++ make pkg-config autoconf automake libtool curl \
+            zlib1g-dev libpng-dev libjpeg-dev libtiff-dev libwebp-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -39,6 +40,9 @@ jobs:
           sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
           # Let appimagetool run without FUSE (CI has no /dev/fuse).
           sudo sed -i 's|AI\x02|\x00\x00\x00|' /usr/local/bin/appimagetool
+
+      - name: Fetch OCR assets (static Tesseract + ara/eng traineddata)
+        run: bash scripts/fetch-tesseract.sh
 
       - name: Build AppImage
         working-directory: anees-gui
@@ -61,6 +65,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch OCR traineddata (ara/eng)
+        shell: bash
+        run: bash scripts/fetch-tesseract.sh --traineddata-only
 
       - name: Build anees-gui
         run: cargo build --release -p anees-gui
