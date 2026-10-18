@@ -5,18 +5,31 @@ from typing import Any
 
 from camel_tools.disambig.mle import MLEDisambiguator
 from camel_tools.tokenizers.word import simple_word_tokenize
-from camel_tools.utils.normalize import normalize_alef_ar, normalize_teh_marbuta
+from camel_tools.utils.dediac import AR_DIAC_CHARSET, dediac_ar
+from camel_tools.utils.normalize import (
+    normalize_alef_ar,
+    normalize_teh_marbuta_ar,
+    normalize_unicode,
+)
 
 from anees.models import TashkeelResult
 
 logger = logging.getLogger("anees.arabic")
+
+MODES = ("full", "semantic", "endings")
+
+# MLE only returns the single best analysis by default; ask for a few so the
+# semantic mode can tell a homograph (عَلَم / عِلْم / عُلِم) from an unambiguous
+# word. Pure case-ending variation (العِلْمِ / العِلْمَ) is discounted.
+TOP_ANALYSES = 5
+SHADDA = "\u0651"
 
 
 class ArabicProcessor:
     def __init__(self) -> None:
         # Lazy: do NOT load camel-tools models in __init__, or the RPC
         # server blocks/crashes on startup when offline. Loaded on first
-        # use via _ensure_loaded().
+        # use via _ensure_loaded(), then reused for the process lifetime.
         self.disambiguator: Any = None
 
     def _ensure_loaded(self) -> bool:
@@ -31,98 +44,99 @@ class ArabicProcessor:
 
     def _load_model(self) -> None:
         """Load camel-tools disambiguator"""
-        self.disambiguator = MLEDisambiguator.pretrained()
+        self.disambiguator = MLEDisambiguator.pretrained(top=TOP_ANALYSES)
         logger.info("Arabic disambiguator loaded")
 
     def add_tashkeel(self, text: str, mode: str = "semantic") -> TashkeelResult:
         """Add diacritics (tashkeel) to Arabic text"""
+        if mode not in MODES:
+            raise ValueError(f"invalid mode: {mode}")
+
         if not text.strip():
             return TashkeelResult(text_with_diacritics=text, changes=0)
 
-        # Normalize
-        text = self._normalize(text)
+        normalized = self._normalize(text)
 
         if not self._ensure_loaded():
-            return TashkeelResult(text_with_diacritics=text, changes=0)
+            return TashkeelResult(text_with_diacritics=normalized, changes=0)
 
-        # Tokenize
-        tokens = simple_word_tokenize(text)
+        tokens = simple_word_tokenize(normalized)
 
-        # Disambiguate
         try:
             disambig = self.disambiguator.disambiguate(tokens)
         except Exception:
             logger.exception("Disambiguation failed")
-            return TashkeelResult(text_with_diacritics=text, changes=0)
+            return TashkeelResult(text_with_diacritics=normalized, changes=0)
 
-        # Reconstruct with diacritics based on mode
-        if mode == "full":
-            result = self._reconstruct_full(disambig)
-        elif mode == "semantic":
-            result = self._reconstruct_semantic(disambig, tokens)
-        elif mode == "endings":
-            result = self._reconstruct_endings(disambig, tokens)
-        else:
-            result = self._reconstruct_semantic(disambig, tokens)
-
-        # Count added diacritics: comparing char-by-char with zip() is wrong
-        # because inserting diacritics shifts all subsequent offsets.
-        # Instead count diacritic codepoints added vs. the input.
-        DIACRITICS = set("ًٌٍَُِّْٰٕٖٜٟٓٔٗ٘ٙٚٛٞـً")
-
-        # Core Arabic vowel marks U+064B–U+0652 plus common extras
-        def _diac_count(s: str) -> int:
-            return sum(1 for c in s if c in DIACRITICS or "\u064b" <= c <= "\u0652")
-
-        changes = _diac_count(result) - _diac_count(text)
-        changes = max(0, changes)
-
-        return TashkeelResult(text_with_diacritics=result, changes=changes)
+        replacements = [
+            self._render(disambig[index], token, mode)
+            for index, token in enumerate(tokens)
+        ]
+        result = self._cleanup(self._rebuild(normalized, tokens, replacements))
+        return TashkeelResult(
+            text_with_diacritics=result,
+            changes=max(0, self._diacritics(result) - self._diacritics(text)),
+        )
 
     def _normalize(self, text: str) -> str:
         """Normalize Arabic text"""
+        text = normalize_unicode(text)
         text = normalize_alef_ar(text)
-        text = normalize_teh_marbuta(text)
-        return text
+        return normalize_teh_marbuta_ar(text)
 
-    def _reconstruct_full(self, disambig: list) -> str:
-        """Full diacritization - all analyses"""
-        parts = []
-        for d in disambig:
-            if d.analyses:
-                parts.append(d.analyses[0].diac)
-            else:
-                parts.append(d.word)
-        return " ".join(parts)
+    def _render(self, disambiguated: Any, token: str, mode: str) -> str:
+        analyses = getattr(disambiguated, "analyses", None)
+        if not analyses:
+            return token
 
-    def _reconstruct_semantic(self, disambig: list, tokens: list[str]) -> str:
-        """Semantic diacritization - only disambiguate homographs"""
-        parts = []
-        for i, d in enumerate(disambig):
-            if d.analyses:
-                # Check if word has multiple analyses with different diacritics
-                diacritics = {a.diac for a in d.analyses}
-                if len(diacritics) > 1:
-                    # Homograph - use first analysis
-                    parts.append(d.analyses[0].diac)
-                else:
-                    # No ambiguity - keep original
-                    parts.append(tokens[i])
-            else:
-                parts.append(tokens[i])
-        return " ".join(parts)
+        diac = analyses[0].diac
+        if mode == "full":
+            return diac
+        if mode == "semantic":
+            return diac if self._is_homograph(analyses) else token
+        if mode == "endings":
+            return dediac_ar(token) + self._ending(diac)
+        return token
 
-    def _reconstruct_endings(self, disambig: list, tokens: list[str]) -> str:
-        """Endings only - case endings for pausing"""
-        parts = []
-        for i, d in enumerate(disambig):
-            if d.analyses:
-                diac = d.analyses[0].diac
-                # Keep only last character's diacritics (case ending)
-                if len(diac) > 1:
-                    parts.append(tokens[i][:-1] + diac[-1])
-                else:
-                    parts.append(tokens[i])
-            else:
-                parts.append(tokens[i])
-        return " ".join(parts)
+    def _is_homograph(self, analyses: list) -> bool:
+        """True when analyses differ beyond their case ending."""
+        stems = {a.diac[: len(a.diac) - len(self._ending(a.diac))] for a in analyses}
+        return len(stems) > 1
+
+    def _ending(self, diac: str) -> str:
+        """Trailing run of diacritics, i.e. the last letter's case ending."""
+        index = len(diac)
+        while index > 0 and diac[index - 1] in AR_DIAC_CHARSET:
+            index -= 1
+        return diac[index:]
+
+    def _rebuild(self, text: str, tokens: list[str], replacements: list[str]) -> str:
+        """Replace tokens in place so whitespace and punctuation are preserved."""
+        parts: list[str] = []
+        cursor = 0
+        for token, replacement in zip(tokens, replacements):
+            start = text.find(token, cursor)
+            if start < 0:
+                continue
+            parts.append(text[cursor:start])
+            parts.append(replacement)
+            cursor = start + len(token)
+        parts.append(text[cursor:])
+        return "".join(parts)
+
+    def _cleanup(self, text: str) -> str:
+        """Drop doubled/stacked diacritics; shadda followed by a vowel is valid."""
+        parts: list[str] = []
+        previous_diacritic = ""
+        for char in text:
+            if char in AR_DIAC_CHARSET and previous_diacritic:
+                if previous_diacritic != SHADDA:
+                    continue
+                if char == SHADDA:
+                    continue
+            parts.append(char)
+            previous_diacritic = char if char in AR_DIAC_CHARSET else ""
+        return "".join(parts)
+
+    def _diacritics(self, text: str) -> int:
+        return sum(1 for char in text if char in AR_DIAC_CHARSET)
