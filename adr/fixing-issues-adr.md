@@ -77,6 +77,31 @@ that backs our implementation choices.
   unverified deletions risk losing work. The confirmation step exists
   because remote history is shared (lesson: Oct 2026 cleanup).
 
+### Rule 7. Tests are part of every change
+- **Rule**: Every issue ships tests in the same PR — no exceptions:
+  - **Normal tests** (unit + integration) for the logic it adds, in the
+    language touched: `cargo test` for Rust, `pytest` for Python. Cover the
+    happy path and at least one failure/edge path of new code.
+  - **End-to-end tests** for any user-facing flow it changes. The canonical
+    e2e suite drives the 5-step wizard — PDF upload → language/OCR config →
+    chunked processing → text review → audio generation — and asserts the
+    observable outcome (files produced, IPC contract, state transitions).
+    GUI flows use an egui driver (e.g. `egui_kittest`/`egui_test`) with
+    deterministic fixtures; backend-only issues satisfy e2e with a full
+    pipeline run on a sample PDF (text, scanned, and mixed).
+  - **Gate wiring is part of the issue**: if a new test suite or e2e harness
+    is introduced, the same PR updates `.github/workflows/ci.yml` so the
+    suite runs in CI. A test that never runs is not a test.
+  - **Definition of Done includes tests**: the reviewer (Rule 3) MUST
+    `REQUEST_CHANGES` on any issue whose new behaviour is untested, or whose
+    user-facing change has no e2e coverage.
+- **Rationale**: This is a maturing product with a long issue queue; tests are
+  the only thing that lets fixes compound without regressions. Front-loading
+  unit + e2e coverage (Issue #35) keeps the loop's auto-merge gate meaningful —
+  green CI must actually mean "verified", not "compiled". E2e coverage is
+  tracked explicitly so the 5-step wizard keeps working as screens land
+  (Issues #18–#30).
+
 ---
 
 ## Tech Notes (researched 2026-10-16)
