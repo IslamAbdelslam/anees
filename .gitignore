@@ -24,6 +24,10 @@ models/
 *.pt
 *.bin
 
+# Fetched OCR assets (see scripts/fetch-tesseract.sh)
+python-backend/src/anees/pdf/bin/
+python-backend/src/anees/pdf/tessdata/
+
 # Generated at runtime by the HTML exporter
 python-backend/src/anees/export/templates/
 

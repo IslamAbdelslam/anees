@@ -4,11 +4,18 @@
 //! artifacts, not Rust code, but a release breaks silently if they lose a
 //! required key (MIME type, icon, uninstaller, install root). These tests
 //! pin those contracts so the files cannot regress unnoticed.
+//!
+//! Issue #9 additionally bundles a static Tesseract 5.x build and the
+//! `ara`/`eng` traineddata with the app; the release workflow and the OCR
+//! fetch script are pinned here too.
 
 #[cfg(test)]
 mod tests {
     const DESKTOP: &str = include_str!("../../installer/linux/anees.desktop");
     const NSIS: &str = include_str!("../../installer/windows/installer.nsi");
+    const FETCH_OCR: &str = include_str!("../../scripts/fetch-tesseract.sh");
+    const RELEASE_WORKFLOW: &str = include_str!("../../.github/workflows/release.yml");
+    const PYPROJECT: &str = include_str!("../../python-backend/pyproject.toml");
 
     #[test]
     fn desktop_entry_is_a_pdf_handler() {
@@ -37,5 +44,21 @@ mod tests {
         assert!(NSIS.contains("WriteUninstaller"));
         assert!(NSIS.contains("$SMPROGRAMS"));
         assert!(NSIS.contains("Software\\Classes\\Anees.PDF"));
+    }
+
+    #[test]
+    fn release_bundles_static_tesseract_and_arabic_english_traineddata() {
+        assert!(FETCH_OCR.contains("tessdata_fast"));
+        assert!(FETCH_OCR.contains("TESSERACT_VERSION="));
+        assert!(FETCH_OCR.contains("--disable-shared"));
+        assert!(FETCH_OCR.contains("eng.traineddata"));
+        assert!(FETCH_OCR.contains("ara.traineddata"));
+        assert!(RELEASE_WORKFLOW.contains("scripts/fetch-tesseract.sh"));
+    }
+
+    #[test]
+    fn ocr_assets_ship_inside_the_python_package() {
+        assert!(PYPROJECT.contains("[tool.setuptools.package-data]"));
+        assert!(PYPROJECT.contains("\"anees.pdf\" = [\"bin/*\", \"tessdata/*\"]"));
     }
 }
