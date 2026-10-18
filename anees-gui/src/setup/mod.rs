@@ -14,6 +14,7 @@ pub use models::{ModelProgress, ModelSpec, CATALOG};
 pub use python::PythonInfo;
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use egui::{ProgressBar, Ui};
 
@@ -21,8 +22,9 @@ use crate::components;
 use crate::theme::palette;
 
 /// Ordered first-run stages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Step {
+    #[default]
     PythonCheck,
     InstallDeps,
     DownloadModels,
@@ -40,28 +42,40 @@ impl Step {
     }
 }
 
-/// First-run state: detected interpreter, chosen installer, per-file
-/// download progress, and the last error (if any). Pure data so it is
-/// testable without a display; `show` only renders it.
-#[derive(Debug, Clone, PartialEq)]
+/// Shared, cloneable download-progress sink. Cloning shares the same buffer,
+/// so a #18 worker thread can record updates while the UI reads snapshots
+/// each frame.
+#[derive(Debug, Clone, Default)]
+pub struct ProgressStore(Arc<Mutex<Vec<ModelProgress>>>);
+
+impl ProgressStore {
+    pub fn snapshot(&self) -> Vec<ModelProgress> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Insert or update the entry for a `(model, file)` pair.
+    pub fn record(&self, progress: ModelProgress) {
+        let mut entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match entries
+            .iter_mut()
+            .find(|e| e.model == progress.model && e.file == progress.file)
+        {
+            Some(slot) => *slot = progress,
+            None => entries.push(progress),
+        }
+    }
+}
+
+/// First-run state: detected interpreter, chosen installer, shared download
+/// progress, and the last error (if any). Pure data so it is testable without
+/// a display; `show` only renders it.
+#[derive(Debug, Clone, Default)]
 pub struct FirstRun {
     pub step: Step,
     pub python: Option<PythonInfo>,
     pub installer: Option<Installer>,
-    pub progress: Vec<ModelProgress>,
+    pub progress: ProgressStore,
     pub error: Option<String>,
-}
-
-impl Default for FirstRun {
-    fn default() -> Self {
-        Self {
-            step: Step::PythonCheck,
-            python: None,
-            installer: None,
-            progress: Vec::new(),
-            error: None,
-        }
-    }
 }
 
 impl FirstRun {
@@ -98,12 +112,12 @@ impl FirstRun {
         }
     }
 
-    /// Step 3: download the given models (advances to `Ready`).
+    /// Step 3: download the given models (advances to `Ready`). Progress
+    /// streams into [`Self::progress`] as it arrives.
     pub fn download_models(&mut self, dir: &Path, specs: &[ModelSpec]) {
-        self.progress.clear();
-        let mut progress = Vec::new();
-        let result = models::download_models(specs, dir, |p| progress.push(p));
-        self.progress = progress;
+        self.progress = ProgressStore::default();
+        let store = self.progress.clone();
+        let result = models::download_models(specs, dir, |p| store.record(p));
         match result {
             Ok(_) => {
                 self.step = Step::Ready;
@@ -128,7 +142,7 @@ impl FirstRun {
             if let Some(installer) = self.installer {
                 ui.label(format!("Installer: {}", installer.binary()));
             }
-            for p in &self.progress {
+            for p in self.progress.snapshot() {
                 ui.add(ProgressBar::new(p.fraction()).text(format!("{} · {}", p.model, p.file)));
             }
             if let Some(err) = &self.error {
@@ -148,7 +162,7 @@ mod tests {
         assert_eq!(fr.step, Step::PythonCheck);
         assert!(fr.python.is_none());
         assert!(fr.installer.is_none());
-        assert!(fr.progress.is_empty());
+        assert!(fr.progress.snapshot().is_empty());
         assert!(fr.error.is_none());
     }
 
@@ -170,5 +184,41 @@ mod tests {
         fr.install_deps(Path::new("/repo/python-backend"));
         assert!(fr.error.is_some());
         assert_eq!(fr.step, Step::PythonCheck);
+    }
+
+    #[test]
+    fn progress_store_upserts_by_file() {
+        let store = ProgressStore::default();
+        let mut p = ModelProgress {
+            model: "m".to_string(),
+            file: "f".to_string(),
+            bytes_done: 10,
+            bytes_total: Some(100),
+        };
+        store.record(p.clone());
+        p.bytes_done = 50;
+        store.record(p);
+        store.record(ModelProgress {
+            model: "m".to_string(),
+            file: "g".to_string(),
+            bytes_done: 1,
+            bytes_total: None,
+        });
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].bytes_done, 50);
+    }
+
+    #[test]
+    fn clones_share_progress_store() {
+        let fr = FirstRun::new();
+        let worker = fr.clone();
+        fr.progress.record(ModelProgress {
+            model: "m".to_string(),
+            file: "f".to_string(),
+            bytes_done: 5,
+            bytes_total: None,
+        });
+        assert_eq!(worker.progress.snapshot().len(), 1);
     }
 }

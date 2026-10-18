@@ -10,7 +10,8 @@ use anees_core::{AneesError, Result};
 /// Hugging Face resolve base; `/resolve/main/` serves the latest revision.
 pub const HF_BASE: &str = "https://huggingface.co";
 
-/// One downloadable model repo. `files` mirrors the backend's TTSEngine.
+/// One downloadable model repo. `files` are repo-relative paths, kept under
+/// `dir/<key>/` exactly as `hf_hub_download(local_dir=...)` would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelSpec {
     pub key: &'static str,
@@ -19,26 +20,33 @@ pub struct ModelSpec {
     pub optional: bool,
 }
 
-const MODEL_FILES: &[&str] = &["model.onnx", "config.json", "vocab.json"];
-
-/// Models offered on first run (see issue #5).
+/// Models offered on first run (issue #5). File lists mirror the real trees
+/// (verified via `GET /api/models/<repo>/tree/main?recursive=true`):
+/// both required repos ship `onnx/model.onnx`, `config.json`, and voice
+/// embeddings under `voices/`; there is no `vocab.json`.
 pub const CATALOG: &[ModelSpec] = &[
     ModelSpec {
         key: "nabra-7m-distill",
         repo: "oddadmix/Nabra-7M-Distill-ONNX",
-        files: MODEL_FILES,
+        files: &["onnx/model.onnx", "config.json", "voices/af_msa.bin"],
         optional: false,
     },
     ModelSpec {
         key: "kokoro-7m-distill",
         repo: "oddadmix/Kokoro-7M-Distill-ONNX",
-        files: MODEL_FILES,
+        files: &[
+            "onnx/model.onnx",
+            "config.json",
+            "voices/af_heart.bin",
+            "voices/af_msa.bin",
+        ],
         optional: false,
     },
+    // Gated/private at the time of writing; downloaded only when reachable.
     ModelSpec {
         key: "nabra-saudi-7m",
         repo: "oddadmix/Nabra-Saudi-7M-ONNX",
-        files: MODEL_FILES,
+        files: &["onnx/model.onnx", "config.json", "voices/af_saudi.bin"],
         optional: true,
     },
 ];
@@ -83,13 +91,19 @@ pub enum Resume {
 }
 
 /// Decide resume behaviour from the existing `.part` length and the
-/// server-reported total (unknown until the request is made).
+/// server-reported total (unknown until a response arrives).
 pub fn plan_resume(existing: u64, total: Option<u64>) -> Resume {
     match total {
         Some(t) if t > 0 && existing >= t => Resume::Complete,
         _ if existing > 0 => Resume::From(existing),
         _ => Resume::Fresh,
     }
+}
+
+/// Total size from a `Content-Range: bytes */TOTAL` (or `bytes a-b/TOTAL`)
+/// header, used to validate a rejected Range response.
+pub fn content_range_total(header: Option<&str>) -> Option<u64> {
+    header?.rsplit('/').next()?.trim().parse().ok()
 }
 
 /// Progress for one file within one model.
@@ -124,25 +138,35 @@ pub fn download_file(
     }
     let part = part_path(dest);
     let existing = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    let start = match plan_resume(existing, None) {
+        Resume::From(offset) => offset,
+        _ => 0,
+    };
 
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         .build();
     let mut request = agent.get(url);
-    if existing > 0 {
-        request = request.set("Range", &format!("bytes={existing}-"));
+    if start > 0 {
+        request = request.set("Range", &format!("bytes={start}-"));
     }
     let response = match request.call() {
         Ok(resp) => resp,
-        // Range beyond EOF means the partial is already complete.
-        Err(ureq::Error::Status(416, _)) if existing > 0 => {
-            fs::rename(&part, dest)?;
-            return Ok(());
+        // 416 means the partial is already >= the remote size: finalize only
+        // when the remote total proves it complete.
+        Err(ureq::Error::Status(416, resp)) => {
+            let total = content_range_total(resp.header("Content-Range"));
+            return match plan_resume(existing, total) {
+                Resume::Complete => Ok(fs::rename(&part, dest)?),
+                _ => Err(AneesError::Model(format!(
+                    "{url}: incomplete (have {existing}, remote {total:?})"
+                ))),
+            };
         }
         Err(e) => return Err(AneesError::Model(format!("{url}: {e}"))),
     };
 
-    let mut offset = existing;
+    let mut offset = start;
     let mut file = if response.status() == 206 {
         OpenOptions::new().append(true).open(&part)?
     } else {
@@ -170,6 +194,14 @@ pub fn download_file(
     }
     file.flush()?;
     drop(file);
+
+    if let Some(expected) = total {
+        if done != expected {
+            return Err(AneesError::Model(format!(
+                "{url}: incomplete ({done} of {expected} bytes)"
+            )));
+        }
+    }
     fs::rename(&part, dest)?;
     Ok(())
 }
@@ -218,22 +250,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_matches_issue_specs() {
+    fn catalog_matches_real_repo_layout() {
         let keys: Vec<_> = CATALOG.iter().map(|m| m.key).collect();
         assert_eq!(
             keys,
             vec!["nabra-7m-distill", "kokoro-7m-distill", "nabra-saudi-7m"]
         );
-        assert!(CATALOG[0].repo.ends_with("Nabra-7M-Distill-ONNX"));
-        assert!(CATALOG[1].repo.ends_with("Kokoro-7M-Distill-ONNX"));
+        for spec in &CATALOG[..2] {
+            assert!(
+                spec.files.contains(&"onnx/model.onnx"),
+                "{} needs onnx/model.onnx",
+                spec.key
+            );
+            assert!(spec.files.contains(&"config.json"));
+            assert!(spec.files.iter().any(|f| f.starts_with("voices/")));
+            assert!(!spec.files.contains(&"vocab.json"));
+        }
         assert!(CATALOG[2].optional);
     }
 
     #[test]
     fn resolve_url_targets_hf_main_revision() {
         assert_eq!(
-            resolve_url("oddadmix/Nabra-7M-Distill-ONNX", "model.onnx"),
-            "https://huggingface.co/oddadmix/Nabra-7M-Distill-ONNX/resolve/main/model.onnx"
+            resolve_url("oddadmix/Nabra-7M-Distill-ONNX", "onnx/model.onnx"),
+            "https://huggingface.co/oddadmix/Nabra-7M-Distill-ONNX/resolve/main/onnx/model.onnx"
         );
     }
 
@@ -262,6 +302,14 @@ mod tests {
     }
 
     #[test]
+    fn content_range_total_reads_last_segment() {
+        assert_eq!(content_range_total(Some("bytes */2155")), Some(2155));
+        assert_eq!(content_range_total(Some("bytes 0-99/1000")), Some(1000));
+        assert_eq!(content_range_total(Some("garbage")), None);
+        assert_eq!(content_range_total(None), None);
+    }
+
+    #[test]
     fn part_path_appends_suffix() {
         assert_eq!(
             part_path(Path::new("/a/model.onnx")),
@@ -283,5 +331,42 @@ mod tests {
             ..p
         };
         assert_eq!(unknown.fraction(), 0.0);
+    }
+
+    /// Opt-in network check: `ANEES_LIVE_HF_TEST=1 cargo test -p anees-gui live_`.
+    /// Probes every required file with a 1-byte Range (no full download) and
+    /// pulls one small file end to end, so a stale path fails loudly.
+    #[test]
+    fn live_catalog_paths_resolve_and_download() {
+        if std::env::var("ANEES_LIVE_HF_TEST").as_deref() != Ok("1") {
+            return;
+        }
+        let agent = ureq::AgentBuilder::new().build();
+        for spec in &CATALOG[..2] {
+            for file in spec.files {
+                let url = resolve_url(spec.repo, file);
+                let resp = agent
+                    .get(&url)
+                    .set("Range", "bytes=0-0")
+                    .call()
+                    .unwrap_or_else(|e| panic!("{url}: {e}"));
+                assert!(
+                    matches!(resp.status(), 200 | 206),
+                    "{url} -> {}",
+                    resp.status()
+                );
+            }
+        }
+        let dir = std::env::temp_dir().join("anees-live-hf-test");
+        let _ = fs::remove_dir_all(&dir);
+        let dest = dir.join("config.json");
+        download_file(
+            &resolve_url(CATALOG[0].repo, "config.json"),
+            &dest,
+            |_, _| {},
+        )
+        .expect("live config.json download");
+        assert!(!fs::read(&dest).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
