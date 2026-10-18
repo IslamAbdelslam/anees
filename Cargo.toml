@@ -25,6 +25,7 @@ egui = "0.29"
 clap = { version = "4.0", features = ["derive"] }
 fastrand = "2.0"
 num_cpus = "1.16"
+ureq = "2"
 
 [workspace.package]
 version = "0.1.0"
