@@ -4,7 +4,7 @@ from anees.models import VoiceInfo
 
 
 class VoiceManager:
-    def __init__(self):
+    def __init__(self) -> None:
         self.catalog: dict[str, dict[str, dict]] = {
             "arabic": {
                 "af_msa": {
@@ -52,7 +52,7 @@ class VoiceManager:
 
     def get_catalog(self) -> dict:
         """Return full voice catalog"""
-        result = {}
+        result: dict[str, dict] = {}
         for lang, voices in self.catalog.items():
             result[lang] = {}
             for vid, info in voices.items():

@@ -24,6 +24,7 @@ class ChunkData(BaseModel):
 
 
 class PdfInfo(BaseModel):
+    valid: bool
     pages: int
     has_text: bool
     file_size: int

@@ -7,6 +7,7 @@ use uuid::Uuid;
 /// PDF document information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PdfInfo {
+    pub valid: bool,
     pub pages: u32,
     pub has_text: bool,
     pub file_size: u64,

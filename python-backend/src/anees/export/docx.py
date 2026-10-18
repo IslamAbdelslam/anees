@@ -17,17 +17,17 @@ logger = logging.getLogger("anees.export.docx")
 
 
 class DOCXExporter:
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
-    def _set_rtl(self, paragraph):
+    def _set_rtl(self, paragraph: Any) -> None:
         """Set paragraph to RTL"""
         paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         pPr = paragraph._p.get_or_add_pPr()
         bidi = OxmlElement("w:bidi")
         pPr.append(bidi)
 
-    def _set_ltr(self, paragraph):
+    def _set_ltr(self, paragraph: Any) -> None:
         """Set paragraph to LTR"""
         paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
         pPr = paragraph._p.get_or_add_pPr()
@@ -35,7 +35,9 @@ class DOCXExporter:
         bidi.set(qn("w:val"), "0")
         pPr.append(bidi)
 
-    def _add_arabic_run(self, paragraph, text: str, bold=False, italic=False):
+    def _add_arabic_run(
+        self, paragraph: Any, text: str, bold: bool = False, italic: bool = False
+    ) -> Any:
         """Add Arabic text run with proper formatting"""
         run = paragraph.add_run(text)
         run.font.name = "IBM Plex Sans Arabic"
@@ -52,7 +54,9 @@ class DOCXExporter:
         rPr.append(rFonts)
         return run
 
-    def _add_english_run(self, paragraph, text: str, bold=False, italic=False):
+    def _add_english_run(
+        self, paragraph: Any, text: str, bold: bool = False, italic: bool = False
+    ) -> Any:
         """Add English text run"""
         run = paragraph.add_run(text)
         run.font.name = "IBM Plex Sans Arabic"

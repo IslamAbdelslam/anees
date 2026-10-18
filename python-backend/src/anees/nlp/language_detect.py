@@ -2,6 +2,7 @@
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import fasttext
 import fasttext.util
@@ -12,11 +13,11 @@ logger = logging.getLogger("anees.lang")
 
 
 class LanguageDetector:
-    def __init__(self, model_path: str | None = None):
+    def __init__(self, model_path: str | None = None) -> None:
         # Lazy: do NOT download (126MB) or load the model here, or the
         # RPC server blocks/crashes on startup when offline. Resolved on
         # first use via _ensure_loaded(), or proactively via models.ensure.
-        self.model = None
+        self.model: Any = None
         self.model_path = model_path
 
     def _ensure_loaded(self) -> bool:
@@ -44,7 +45,7 @@ class LanguageDetector:
 
         return str(model_file)
 
-    def _load_model(self):
+    def _load_model(self) -> None:
         """Load fasttext model"""
         self.model = fasttext.load_model(self.model_path)
         logger.info("Language detection model loaded")

@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -54,7 +54,7 @@ class JSONRPCNotification(BaseModel):
 
 
 class AneesRPCServer:
-    def __init__(self):
+    def __init__(self) -> None:
         self.extractor = PDFExtractor()
         self.ocr = OCREngine()
         self.chunker = PDFChunker()
@@ -115,10 +115,10 @@ class AneesRPCServer:
             logger.exception(f"Error in method {method}")
             return JSONRPCResponse(id=request.id, error={"code": -32603, "message": str(e)})
 
-    async def handle_notification(self, notification: JSONRPCNotification):
+    async def handle_notification(self, notification: JSONRPCNotification) -> None:
         logger.debug(f"Notification: {notification.method}")
 
-    def attach_writer(self, writer) -> None:
+    def attach_writer(self, writer: Any) -> None:
         """Attach the stdout writer so the server can push notifications."""
         self._writer = writer
 
@@ -204,7 +204,7 @@ class AneesRPCServer:
         speed = params.get("speed", 1.0)
         if not all([text, lang, voice]):
             raise ValueError("text, lang, voice required")
-        audio = self.tts.synthesize(text, lang, voice, speed)
+        audio = self.tts.synthesize(cast(str, text), cast(str, lang), cast(str, voice), speed)
         import base64
 
         return {
@@ -253,7 +253,9 @@ class AneesRPCServer:
         output = params.get("output")
         if not all([job_id, pdf_path]):
             raise ValueError("job_id and pdf_path required")
-        job = await self.orchestrator.start_job(job_id, pdf_path, language_mode, voice, output)
+        job = await self.orchestrator.start_job(
+            cast(str, job_id), cast(str, pdf_path), language_mode, voice, cast(str, output)
+        )
         return job.to_dict()
 
     async def job_status(self, params: dict) -> dict:
@@ -264,7 +266,7 @@ class AneesRPCServer:
         return status.to_dict()
 
 
-async def main():
+async def main() -> None:
     server = AneesRPCServer()
 
     # Read from stdin, write to stdout
@@ -289,12 +291,12 @@ async def main():
         if not line:
             break
 
-        line = line.decode().strip()
-        if not line:
+        payload = line.decode().strip()
+        if not payload:
             continue
 
         try:
-            data = json.loads(line)
+            data = json.loads(payload)
         except json.JSONDecodeError:
             # Unparseable: the id is unknowable, answer with null per spec.
             await send_error_response(None, -32700, "Parse error: invalid JSON")

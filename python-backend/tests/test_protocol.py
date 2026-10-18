@@ -32,12 +32,12 @@ EXPECTED_METHODS = [
 EXPECTED_ERROR_CODES = [-32700, -32600, -32601, -32602, -32603]
 
 
-def _json_blocks():
+def _json_blocks() -> list[str]:
     text = SPEC.read_text(encoding="utf-8")
     return re.findall(r"```json\n(.*?)```", text, re.DOTALL)
 
 
-def test_spec_exists_and_lists_all_methods():
+def test_spec_exists_and_lists_all_methods() -> None:
     text = SPEC.read_text(encoding="utf-8")
     for method in EXPECTED_METHODS:
         assert f"`{method}`" in text, f"method missing from spec: {method}"
@@ -45,25 +45,25 @@ def test_spec_exists_and_lists_all_methods():
         assert f"`{code}`" in text, f"error code missing from spec: {code}"
 
 
-def test_all_spec_json_blocks_parse():
+def test_all_spec_json_blocks_parse() -> None:
     blocks = _json_blocks()
     assert len(blocks) >= 3, "spec should show request/response/error examples"
     for block in blocks:
         json.loads(block)
 
 
-def test_request_example_shape():
+def test_request_example_shape() -> None:
     text = SPEC.read_text(encoding="utf-8")
-    example = json.loads(
-        re.search(r"### 2\.1 Request.*?\n```json\n(.*?)```", text, re.DOTALL).group(1)
-    )
+    match = re.search(r"### 2\.1 Request.*?\n```json\n(.*?)```", text, re.DOTALL)
+    assert match is not None
+    example = json.loads(match.group(1))
     assert example["jsonrpc"] == "2.0"
     assert "id" in example and example["id"] is not None
     assert isinstance(example["method"], str)
     assert "result" not in example and "error" not in example
 
 
-def test_response_examples_shape():
+def test_response_examples_shape() -> None:
     blocks = _json_blocks()
     success = next(b for b in blocks if "result" in json.loads(b))
     failure = next(b for b in blocks if "error" in json.loads(b))
@@ -76,7 +76,7 @@ def test_response_examples_shape():
     assert "result" not in failure
 
 
-def test_notification_table_shapes():
+def test_notification_table_shapes() -> None:
     text = SPEC.read_text(encoding="utf-8").replace("\\", "")
     assert "`progress`" in text and "progress: 0.0–1.0" in text
     assert "`log`" in text and "error|warn|info|debug" in text

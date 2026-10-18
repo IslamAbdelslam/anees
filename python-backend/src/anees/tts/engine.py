@@ -2,6 +2,7 @@
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import onnxruntime as ort
@@ -15,7 +16,7 @@ class TTSEngine:
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
         self.sessions: dict[str, ort.InferenceSession] = {}
-        self.tokenizers: dict[str, any] = {}
+        self.tokenizers: dict[str, Any] = {}
         self.configs: dict[str, dict] = {}
 
         # Voice embeddings
@@ -119,7 +120,7 @@ class TTSEngine:
                 },
             )
             audio = outputs[0].squeeze()
-            return audio.astype(np.float32)
+            return np.asarray(audio, dtype=np.float32)
         except Exception:
             logger.exception("TTS inference failed")
             # Return silence as fallback

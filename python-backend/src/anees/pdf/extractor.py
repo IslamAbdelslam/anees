@@ -14,41 +14,72 @@ class PDFExtractor:
 
     def validate(self, path: str) -> PdfInfo:
         """Validate PDF and return metadata"""
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"PDF not found: {path}")
+        pdf_path = Path(path)
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-        doc = fitz.open(path)
-        has_text = False
-        detected_langs = []
+        file_size = pdf_path.stat().st_size
 
-        # Sample first 5 pages for language detection
-        for i, page in enumerate(doc):
-            if i >= 5:
-                break
-            text = page.get_text().strip()
-            if text:
-                has_text = True
-                # Simple script detection
-                if "ar" not in detected_langs and any("\u0600" <= c <= "\u06ff" for c in text):
-                    detected_langs.append("ar")
-                if "en" not in detected_langs and any("a" <= c.lower() <= "z" for c in text):
-                    detected_langs.append("en")
+        try:
+            with fitz.open(pdf_path) as doc:
+                if doc.needs_pass:
+                    return PdfInfo(
+                        valid=True,
+                        pages=doc.page_count,
+                        has_text=False,
+                        file_size=file_size,
+                        encrypted=True,
+                        detected_langs=[],
+                    )
 
-        return PdfInfo(
-            pages=len(doc),
-            has_text=has_text,
-            file_size=path.stat().st_size,
-            encrypted=doc.is_encrypted,
-            detected_langs=detected_langs,
-        )
+                has_text = False
+                detected_langs = []
+
+                for i, page in enumerate(doc):
+                    text = page.get_text().strip()
+                    if text:
+                        has_text = True
+                    if i < 5:
+                        # Simple script detection on the sampled pages
+                        if (
+                            text
+                            and "ar" not in detected_langs
+                            and any("\u0600" <= c <= "\u06ff" for c in text)
+                        ):
+                            detected_langs.append("ar")
+                        if (
+                            text
+                            and "en" not in detected_langs
+                            and any("a" <= c.lower() <= "z" for c in text)
+                        ):
+                            detected_langs.append("en")
+                    elif has_text:
+                        break
+
+                return PdfInfo(
+                    valid=True,
+                    pages=len(doc),
+                    has_text=has_text,
+                    file_size=file_size,
+                    encrypted=doc.is_encrypted,
+                    detected_langs=detected_langs,
+                )
+        except (RuntimeError, ValueError):
+            return PdfInfo(
+                valid=False,
+                pages=0,
+                has_text=False,
+                file_size=file_size,
+                encrypted=False,
+                detected_langs=[],
+            )
 
     def extract(
         self, path: str, page_range: tuple[int, int] | None = None, langs: list[str] | None = None
     ) -> list[ChunkData]:
         """Extract text from PDF using pdfplumber (layout-aware)"""
-        path = Path(path)
-        doc = fitz.open(path)
+        pdf_path = Path(path)
+        doc = fitz.open(pdf_path)
         total_pages = len(doc)
 
         if page_range is None:
@@ -58,7 +89,7 @@ class PDFExtractor:
         start = max(0, start)
         end = min(total_pages, end)
 
-        with pdfplumber.open(path) as pdf:
+        with pdfplumber.open(pdf_path) as pdf:
             chunks = []
             chunk_size = 10
 
