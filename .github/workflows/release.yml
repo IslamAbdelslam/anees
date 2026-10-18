@@ -1,0 +1,127 @@
+name: Release
+
+# Cut a release by pushing a version tag: `git tag v0.1.0 && git push origin v0.1.0`.
+# Builds a Linux AppImage (cargo-appimage) and a Windows NSIS installer, then
+# publishes both to a GitHub Release whose notes are generated from the commits
+# since the previous tag.
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  linux-appimage:
+    name: Linux AppImage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
+            file wget
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-appimage and appimagetool
+        run: |
+          cargo install cargo-appimage
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+          sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
+          # Let appimagetool run without FUSE (CI has no /dev/fuse).
+          sudo sed -i 's|AI\x02|\x00\x00\x00|' /usr/local/bin/appimagetool
+
+      - name: Build AppImage
+        working-directory: anees-gui
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: cargo appimage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anees-linux-appimage
+          path: target/appimage/*.AppImage
+          if-no-files-found: error
+
+  windows-nsis:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build anees-gui
+        run: cargo build --release -p anees-gui
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis --no-progress -y
+          $nsis = @("${env:ProgramFiles(x86)}\NSIS", "$env:ProgramFiles\NSIS") |
+            Where-Object { Test-Path (Join-Path $_ "makensis.exe") } |
+            Select-Object -First 1
+          if (-not $nsis) { throw "makensis.exe not found after installing NSIS" }
+          Add-Content -Path $env:GITHUB_PATH -Value $nsis
+
+      - name: Derive version
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build installer
+        working-directory: installer/windows
+        run: makensis /DAPP_VERSION=${{ steps.version.outputs.version }} installer.nsi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anees-windows-installer
+          path: installer/windows/Anees-*-Setup.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [linux-appimage, windows-nsis]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate changelog from commits
+        run: |
+          prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          if [ -n "$prev" ]; then range="$prev..$GITHUB_REF_NAME"; else range="$GITHUB_REF_NAME"; fi
+          {
+            echo "## What's Changed"
+            git log --no-merges --pretty='- %s (%h)' "$range"
+          } > CHANGELOG.md
+          cat CHANGELOG.md
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: CHANGELOG.md
+          generate_release_notes: false
+          files: dist/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

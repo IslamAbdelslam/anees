@@ -4,5 +4,7 @@
 //! (both land per Issue #4; screens arrive from #18 onward).
 
 pub mod components;
+#[cfg(test)]
+mod packaging;
 pub mod setup;
 pub mod theme;
