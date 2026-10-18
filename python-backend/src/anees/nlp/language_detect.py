@@ -7,9 +7,20 @@ from typing import Any
 import fasttext
 import fasttext.util
 
-from anees.models import LanguageDetection, TextSegment
+from anees.models import LanguageDetection
 
 logger = logging.getLogger("anees.lang")
+
+# Detections below this confidence are not auto-trusted and need review.
+AUTO_CONFIDENCE_THRESHOLD = 0.8
+
+ARABIC_RANGES = (
+    ("\u0600", "\u06ff"),
+    ("\u0750", "\u077f"),
+    ("\u08a0", "\u08ff"),
+    ("\ufb50", "\ufdff"),
+    ("\ufe70", "\ufeff"),
+)
 
 
 class LanguageDetector:
@@ -19,6 +30,7 @@ class LanguageDetector:
         # first use via _ensure_loaded(), or proactively via models.ensure.
         self.model: Any = None
         self.model_path = model_path
+        self._cache: dict[str, LanguageDetection] = {}
 
     def _ensure_loaded(self) -> bool:
         """Load model on first use. Returns False (no raise) if unavailable."""
@@ -51,56 +63,78 @@ class LanguageDetector:
         logger.info("Language detection model loaded")
 
     def detect(self, text: str) -> LanguageDetection:
-        """Detect language of text"""
+        """Detect language of text, cached per session"""
+        key = text.strip()
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        result = self._detect_uncached(text)
+        if result.lang != "unknown":
+            self._cache[key] = result
+        return result
+
+    def _detect_uncached(self, text: str) -> LanguageDetection:
         if not text.strip():
             return LanguageDetection(lang="unknown", confidence=0.0)
+
+        # Arabic + Latin letters in one segment means the segment is mixed.
+        if self._has_arabic(text) and self._has_latin(text):
+            return LanguageDetection(lang="mixed", confidence=1.0)
 
         if not self._ensure_loaded():
             return LanguageDetection(lang="unknown", confidence=0.0)
 
-        # Clean text
-        clean_text = text.replace("\n", " ").strip()
-        if not clean_text:
-            return LanguageDetection(lang="unknown", confidence=0.0)
-
         try:
-            predictions = self.model.predict(clean_text, k=1)
-            lang_code = predictions[0][0].replace("__label__", "")
-            confidence = float(predictions[1][0])
-
-            # Map fasttext codes to our codes
-            lang_map = {
-                "ar": "ar",
-                "en": "en",
-                "fr": "fr",
-                "de": "de",
-                "es": "es",
-                "it": "it",
-                "pt": "pt",
-                "ru": "ru",
-                "zh": "zh",
-                "ja": "ja",
-                "ko": "ko",
-            }
-
-            mapped_lang = lang_map.get(lang_code, lang_code)
-
-            # Check for mixed scripts
-            if self._has_arabic(text) and self._has_latin(text):
-                mapped_lang = "mixed"
-
-            return LanguageDetection(lang=mapped_lang, confidence=confidence)
-
+            clean_text = text.replace("\n", " ").strip()
+            lang_code, confidence = self._predict(clean_text)
         except Exception:
             logger.exception("Language detection failed")
             return LanguageDetection(lang="unknown", confidence=0.0)
 
-    def detect_batch(self, segments: list[TextSegment]) -> list[LanguageDetection]:
-        """Detect language for multiple segments"""
-        return [self.detect(seg.text) for seg in segments]
+        # The app only speaks Arabic and English: map anything else by script.
+        if lang_code in ("ar", "en"):
+            lang = lang_code
+        else:
+            lang = "ar" if self._has_arabic(text) else "en"
+
+        return LanguageDetection(lang=lang, confidence=max(0.0, min(1.0, confidence)))
+
+    def _predict(self, text: str) -> tuple[str, float]:
+        """Return (label, probability), tolerating fasttext's numpy>=2 breakage."""
+        try:
+            labels, probs = self.model.predict(text, k=1)
+            return labels[0].replace("__label__", ""), float(probs[0])
+        except ValueError:
+            # fasttext<=0.9.3 calls np.array(..., copy=False), which numpy>=2
+            # rejects; the underlying binding is unaffected.
+            prob, label = self.model.f.predict(text + "\n", 1, 0.0, "strict")[0]
+            return label.replace("__label__", ""), float(prob)
+
+    def detect_segments(self, segments: list[dict]) -> list[dict]:
+        """Detect language per segment; segments are ``{text, page}`` objects."""
+        results: list[dict] = []
+        for index, segment in enumerate(segments):
+            if not isinstance(segment, dict) or "text" not in segment:
+                raise ValueError(f"segments[{index}] must be an object with a 'text' field")
+            text = segment.get("text", "")
+            if not isinstance(text, str):
+                raise ValueError(f"segments[{index}].text must be a string")  # noqa: TRY004
+            page = segment.get("page", 1)
+            detection = self.detect(text)
+            results.append(
+                {
+                    "text": text,
+                    "page": page,
+                    "lang": detection.lang,
+                    "confidence": detection.confidence,
+                    "needs_review": detection.confidence < AUTO_CONFIDENCE_THRESHOLD,
+                }
+            )
+        return results
 
     def _has_arabic(self, text: str) -> bool:
-        return any("\u0600" <= c <= "\u06ff" for c in text)
+        return any(any(lo <= c <= hi for lo, hi in ARABIC_RANGES) for c in text)
 
     def _has_latin(self, text: str) -> bool:
         return any("a" <= c.lower() <= "z" for c in text)
