@@ -115,8 +115,16 @@ These are the reason this loop terminates. Every one is enforced in the driver.
 | `MAX_ENGINEER_RUNS` | 120 | stop cleanly |
 | `MAX_ROTATIONS` | 2 | stop rotating; escalate the issue |
 | `CTX_ROTATE_PCT` | 95 | rotate to another free model + fresh context |
+| Stall watchdog | `STALL_SECONDS`=900 | relay run with no new events for 15 min → killed (SIGTERM → model marked bad → rotation) |
+| Clean-tree per issue | on | dirty tree at issue start (incl. untracked) → refuse to start; no `git add -A` sweep |
+| Self-tamper guard | on | loop scripts modified mid-run → refuse to commit (`LOOP_SELF_EDIT_OK=1` opts out) |
+| Numeric selection guard | on | `select_next` returning a non-numeric id → halt (state-file junk prevention) |
 | Kill switch | — | `.delegate/STOP` file present → stop before next dispatch |
 | Escalation is terminal | on | a `loop:needs-human` issue is never re-picked in the same run |
+
+Stale state is reconciled with GitHub: if the state file says `escalated` but
+the issue is closed on GitHub, the driver rewrites the entry to `merged` instead
+of skipping the issue.
 
 **Termination condition**: the queue is empty, OR every remaining issue is
 escalated (`loop:needs-human`) / blocked, OR a global budget is exhausted. The
@@ -143,20 +151,29 @@ Scope and limits of the grant:
 
 ## 6. Running it
 
+Always start via the append-mode launcher so restarts keep one continuous log
+(raw `> ...log` truncates the previous run's history):
+
 ```bash
 # Validate without touching anything (recommended first):
 scripts/loop.sh --dry-run
 
-# Run the full sequential queue:
-scripts/loop.sh
-
-# Run a bounded pilot (3 issues), or a single issue:
-scripts/loop.sh --max-issues 3
-scripts/loop.sh --only 7
+# Start (appends to .delegate/loop.log with a timestamped header):
+scripts/loop-start.sh                      # full sequential queue
+scripts/loop-start.sh --max-issues 5       # bounded pilot
+scripts/loop-start.sh --only 7             # single issue
 
 # Stop the loop:
 scripts/loop.sh --stop        # writes .delegate/STOP
+
+# Monitor:
+tail -f .delegate/loop.log
 ```
+
+**Operator rule**: never edit the repository while the loop is running — the
+driver owns the tree. The per-issue clean-tree guard and the self-tamper guard
+will refuse to start/commit if you do, but don't rely on the guard rails; use a
+separate checkout for parallel work.
 
 State and artifacts land under `.delegate/`:
 
@@ -164,21 +181,24 @@ State and artifacts land under `.delegate/`:
 .delegate/
   config.json        # lane map (build=deepseek, review=glm)
   loop-state.json    # per-issue status, cycles, counters (resumable)
+  loop.log           # continuous log across restarts (append-only)
+  loop.pid           # pid of the running loop (launcher also checks it)
   STOP               # present => loop halts before next dispatch
   runs/<N>/...       # briefs, result.json, diffs, verdicts per iteration
 ```
 
 ## 7. Escalation format
 
-When an issue is escalated the driver appends to
-`.delegate/runs/<N>/ESCALATION.md` and labels the issue `loop:needs-human`:
+When an issue is escalated the driver writes `.delegate/runs/<N>/ESCALATION.md`
+(reason, last verdict, last gate-output tail, last engineer run status incl. a
+stall-watchdog marker when applicable) and labels the issue `loop:needs-human`:
 
 ```markdown
 # Issue #<N> escalated
 Reason: max fix cycles / no progress / identical diff / red CI / reviewer unavailable
 Last verdict: <verdict json>
-Findings:
-- <finding>
+Last gate output (tail of .../gates-<k>.txt): ...
+Engineer run (.../engineer-<k>): {"status": ..., "finalMessage": ...}
 Human action needed: <what to decide>
 ```
 
