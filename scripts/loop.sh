@@ -80,6 +80,7 @@ Options:
 Env dials: MAX_FIX_CYCLES MAX_ISSUES MAX_WALL_SECONDS MAX_ENGINEER_RUNS
            CI_TIMEOUT ENGINEER_TIMEOUT REVIEW_TIMEOUT LOOP_ADMIN_MERGE
            ROTATION_MODELS MAX_ROTATIONS CTX_ROTATE_PCT DEFAULT_CONTEXT_WINDOW
+           STALL_SECONDS STALL_POLL
 EOF
 }
 
@@ -177,6 +178,13 @@ select_next() {
       warn "$SELECT_REASON"; return 1
     fi
     if issue_is_escalated "$n"; then
+      local st
+      st="$(gh_json gh issue view "$n" --repo "$REPO_SLUG" --json state --jq .state 2>/dev/null)"
+      if [ "$st" = "CLOSED" ]; then
+        warn "issue #$n is closed but state said escalated; marking merged"
+        state_set "$n" status '"merged"'
+        continue
+      fi
       warn "skipping #$n (escalated, terminal this run)"; continue
     fi
     printf '%s\n' "$n"; return 0
@@ -228,7 +236,7 @@ run_engineer() { # brief outdir sessionfile -> 0 if a run completed
     local -a a=(--brief "$brief" --lane build --model "$CUR_ENGINEER" --cd "$REPO_ROOT"
                  --timeout "$ENGINEER_TIMEOUT" --out-dir "$outdir")
     [ -s "$sfile" ] && a+=(--session "$(cat "$sfile")")
-    node "$RELAY" "${a[@]}"
+    run_relay_guarded "$outdir" "${a[@]}"
     ENGINEER_RUNS=$((ENGINEER_RUNS+1))
     if [ -f "$outdir/result.json" ] && [ "$(jq -r '.status // empty' "$outdir/result.json")" = "completed" ]; then
       mark_model_ok "$CUR_ENGINEER"
@@ -256,7 +264,7 @@ run_reviewer() { # brief outdir verdictout -> 0 if a parseable verdict was produ
     ensure_reviewer_model
     local -a a=(--brief "$brief" --lane review --model "$CUR_REVIEWER" --read-only
                 --cd "$REPO_ROOT" --timeout "$REVIEW_TIMEOUT" --out-dir "$outdir")
-    node "$RELAY" "${a[@]}"
+    run_relay_guarded "$outdir" "${a[@]}"
     REVIEWER_RUNS=$((REVIEWER_RUNS+1))
     if [ -f "$outdir/result.json" ] && extract_verdict "$outdir/result.json" "$vout"; then
       mark_model_ok "$CUR_REVIEWER"
@@ -405,12 +413,25 @@ verdict_field() { jq -r "$2" "$1" 2>/dev/null; }
 escalate() { # issue run_dir reason
   local n="$1" dir="$2" reason="$3"
   log "ESCALATING #$n: $reason"
+  local latest_gates latest_eng
+  latest_gates="$(ls -1t "$dir"/gates-*.txt 2>/dev/null | head -1)"
+  latest_eng="$(ls -1td "$dir"/engineer-* 2>/dev/null | head -1)"
   {
     echo "# Issue #$n escalated"; echo
     echo "Reason: $reason"; echo
     echo "## Last verdict"; echo '```json'
     [ -f "$dir/verdict.json" ] && cat "$dir/verdict.json" || echo '{}'
     echo '```'; echo
+    echo "## Last gate output (tail of ${latest_gates:-none})"; echo '```'
+    [ -n "$latest_gates" ] && tail -60 "$latest_gates"
+    echo '```'; echo
+    if [ -n "$latest_eng" ] && [ -f "$latest_eng/result.json" ]; then
+      echo "## Engineer run ($latest_eng)"; echo '```json'
+      jq '{status,exitCode,signal,finalMessage:((.finalMessage // "")[-400:])}' \
+         "$latest_eng/result.json" 2>/dev/null || cat "$latest_eng/result.json"
+      echo '```'; echo
+      [ -f "$latest_eng/.stalled" ] && echo "Note: this run was killed by the stall watchdog." && echo
+    fi
     echo "Human action needed: review $dir and decide the next step."
   } > "$dir/ESCALATION.md"
   gh label create loop:needs-human --repo "$REPO_SLUG" --color B60205 \
@@ -459,9 +480,19 @@ work_issue() { # n -> 0 landed, 1 escalated
     git -C "$REPO_ROOT" checkout -B "$branch" "origin/$BASE_BRANCH" --quiet
   fi
 
+  # Per-issue clean-tree guard: a reset --hard leaves untracked files behind, and
+  # the commit step below runs `git add -A`; refuse to start an issue on a dirty
+  # tree so stray/concurrent edits can never be swept into an issue commit.
+  if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
+    git -C "$REPO_ROOT" status --porcelain | sed 's/^/  /' >&2
+    escalate "$n" "$dir" "working tree not clean at issue start; refusing to sweep stray changes"
+    return 1
+  fi
+
   local cycle=0 prev_hash="" prev_sig=""
   while :; do
     # ---- guards ----
+    heartbeat
     [ -f "$STOP_FILE" ] && { warn "STOP file present; halting"; return 1; }
     if [ "$ENGINEER_RUNS" -ge "$MAX_ENGINEER_RUNS" ]; then warn "engineer budget hit"; return 1; fi
     if [ $(( $(date +%s) - START_EPOCH )) -ge "$MAX_WALL_SECONDS" ]; then warn "wall-clock budget hit"; return 1; fi
@@ -524,6 +555,13 @@ work_issue() { # n -> 0 landed, 1 escalated
     [ -n "$msg" ] || msg="chore(issue-$n): $title"
     # idempotent commit: skip if nothing changed since last commit
     if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
+      # Self-tamper guard: a live edit to the loop scripts must not ride along in
+      # an issue commit (this bit us once). Opt out with LOOP_SELF_EDIT_OK=1.
+      if [ "${LOOP_SELF_EDIT_OK:-0}" != "1" ] && \
+         ! git -C "$REPO_ROOT" diff --quiet HEAD -- scripts/loop.sh scripts/loop_lib.sh scripts/loop-start.sh 2>/dev/null; then
+        escalate "$n" "$dir" "loop scripts modified during the run; refusing to commit"
+        return 1
+      fi
       git -C "$REPO_ROOT" add -A
       git -C "$REPO_ROOT" commit -q -m "$msg
 
@@ -632,6 +670,9 @@ while :; do
   else
     N="$(select_next)" || { log "${SELECT_REASON:-queue empty}; done"; break; }
   fi
+  case "$N" in
+    ''|*[!0-9]*) warn "select_next returned a non-numeric issue id; halting (got '$N')"; break ;;
+  esac
 
   if work_issue "$N"; then :; else warn "issue #$N not landed (continued)"; fi
   [ "$ONLY_ONCE" = 1 ] && { log "--only was set; stopping after issue #$N"; break; }
