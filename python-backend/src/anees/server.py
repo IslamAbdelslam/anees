@@ -232,8 +232,8 @@ class AneesRPCServer:
         return self.voices.get_catalog()
 
     async def preview_voice(self, params: dict) -> dict:
-        voice = params.get("voice")
-        lang = params.get("lang", "ar")
+        voice = params.get("voice") or params.get("voice_id")
+        lang = params.get("lang")
         if not voice:
             raise ValueError("voice required")
         audio = self.tts.preview(voice, lang)
