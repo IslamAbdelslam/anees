@@ -7,7 +7,19 @@ from typing import Any
 import numpy as np
 import onnxruntime as ort
 
+from anees.tts.voices import VOICE_LANGUAGES
+
 logger = logging.getLogger("anees.tts")
+
+SAMPLE_RATE = 24000
+PREVIEW_SECONDS = 3.0
+STYLE_DIM = 256
+
+PREVIEW_TEXT = {
+    "ar": "مرحباً بكم في أنيس",
+    "ar_saudi": "مرحباً بكم في أنيس",
+    "en": "Welcome to Anees",
+}
 
 
 class TTSEngine:
@@ -19,7 +31,7 @@ class TTSEngine:
         self.tokenizers: dict[str, Any] = {}
         self.configs: dict[str, dict] = {}
 
-        # Voice embeddings
+        # Voice embeddings, loaded lazily and keyed by voice id
         self.voice_embeddings: dict[str, np.ndarray] = {}
 
     def ensure_models(self, model_names: list[str]) -> dict[str, str]:
@@ -107,7 +119,7 @@ class TTSEngine:
         phoneme_ids = self._phonemize(text, lang, voice)
 
         # Get voice embedding
-        voice_emb = self._get_voice_embedding(voice, lang)
+        voice_emb = self._get_voice_embedding(voice, phoneme_ids.shape[-1])
 
         # Run inference
         try:
@@ -126,16 +138,66 @@ class TTSEngine:
             # Return silence as fallback
             return np.zeros(24000, dtype=np.float32)
 
-    def _get_voice_embedding(self, voice: str, lang: str) -> np.ndarray:
-        """Get voice embedding"""
-        key = f"{lang}:{voice}"
-        if key not in self.voice_embeddings:
-            # Load from model directory or generate default
-            # In production, load from .pt files
-            self.voice_embeddings[key] = np.random.randn(256).astype(np.float32)
-        return self.voice_embeddings[key].reshape(1, -1)
+    def find_voice_file(self, voice_id: str) -> Path | None:
+        """Locate a voice embedding in any downloaded model repo."""
+        for suffix in (".pt", ".bin"):
+            matches = sorted(self.models_dir.glob(f"*/voices/{voice_id}{suffix}"))
+            if matches:
+                return matches[0]
+        return None
 
-    def preview(self, voice: str, lang: str) -> np.ndarray:
-        """Generate preview audio for voice"""
-        preview_text = "مرحباً بكم في أنيس" if lang == "ar" else "Welcome to Anees"
-        return self.synthesize(preview_text, lang, voice, 1.0)
+    def load_voice_embedding(self, voice_id: str) -> np.ndarray:
+        """Load a voice embedding on demand and cache it by voice id."""
+        cached = self.voice_embeddings.get(voice_id)
+        if cached is not None:
+            return cached
+
+        path = self.find_voice_file(voice_id)
+        if path is None:
+            raise FileNotFoundError(f"Voice embedding not found: {voice_id}")
+
+        embedding = (
+            self._read_torch_embedding(path)
+            if path.suffix == ".pt"
+            else self._read_raw_embedding(path)
+        )
+        self.voice_embeddings[voice_id] = embedding
+        return embedding
+
+    @staticmethod
+    def _read_torch_embedding(path: Path) -> np.ndarray:
+        import torch
+
+        value = torch.load(path, map_location="cpu", weights_only=True)
+        if isinstance(value, dict):
+            value = next(iter(value.values()))
+        return np.asarray(value.detach().cpu().numpy(), dtype=np.float32)
+
+    @staticmethod
+    def _read_raw_embedding(path: Path) -> np.ndarray:
+        raw = np.fromfile(path, dtype=np.float32)
+        if raw.size and raw.size % STYLE_DIM == 0:
+            raw = raw.reshape(-1, 1, STYLE_DIM)
+        return raw
+
+    def _get_voice_embedding(self, voice: str, num_phonemes: int = 1) -> np.ndarray:
+        """Select the style row for this utterance and shape it as [1, STYLE_DIM]."""
+        embedding = self.load_voice_embedding(voice)
+        index = min(max(num_phonemes - 1, 0), embedding.shape[0] - 1)
+        if embedding.ndim == 3 or (embedding.ndim == 2 and embedding.shape[-1] == STYLE_DIM):
+            embedding = embedding[index]
+        return np.asarray(embedding, dtype=np.float32).reshape(1, -1)
+
+    def preview(self, voice: str, lang: str | None = None) -> np.ndarray:
+        """Synthesize a fixed-length sample for voice audition."""
+        language = lang or VOICE_LANGUAGES.get(voice, "ar")
+        text = PREVIEW_TEXT.get(language, PREVIEW_TEXT["ar"])
+        return self._fit_duration(self.synthesize(text, language, voice, 1.0), PREVIEW_SECONDS)
+
+    @staticmethod
+    def _fit_duration(audio: np.ndarray, seconds: float) -> np.ndarray:
+        samples = int(SAMPLE_RATE * seconds)
+        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if audio.size >= samples:
+            return audio[:samples]
+        return np.pad(audio, (0, samples - audio.size))

@@ -1,84 +1,108 @@
-"""Voice management for TTS"""
+"""Voice catalog and default-voice preferences for TTS."""
 
-from anees.models import VoiceInfo
+import json
+import logging
+import os
+from pathlib import Path
+
+logger = logging.getLogger("anees.tts.voices")
+
+VOICE_CATALOG: dict[str, dict[str, str]] = {
+    "arabic": {
+        "af_msa": "Modern Standard Arabic (Female)",
+        "am_msa": "Modern Standard Arabic (Male)",
+    },
+    "english": {
+        "af_bella": "US English (Female)",
+        "am_michael": "US English (Male)",
+        "bf_emma": "UK English (Female)",
+    },
+    "saudi": {
+        "af_saudi": "Saudi Arabic (Female)",
+    },
+}
+
+DEFAULT_VOICES = {
+    "arabic": "af_msa",
+    "english": "af_bella",
+    "saudi": "af_saudi",
+}
+
+LANGUAGE_CODES = {
+    "arabic": "ar",
+    "english": "en",
+    "saudi": "ar_saudi",
+}
+
+VOICE_LANGUAGES = {
+    voice_id: LANGUAGE_CODES[language]
+    for language, voices in VOICE_CATALOG.items()
+    for voice_id in voices
+}
+
+
+def default_config_path() -> Path:
+    override = os.environ.get("ANEES_CONFIG_DIR")
+    base = Path(override) if override else Path.home() / ".config" / "anees"
+    return base / "voices.json"
 
 
 class VoiceManager:
-    def __init__(self) -> None:
-        self.catalog: dict[str, dict[str, dict]] = {
-            "arabic": {
-                "af_msa": {
-                    "name": "Modern Standard Arabic (Female)",
-                    "gender": "female",
-                    "style": "academic",
-                    "recommended": True,
-                },
-                "am_msa": {
-                    "name": "Modern Standard Arabic (Male)",
-                    "gender": "male",
-                    "style": "academic",
-                    "recommended": False,
-                },
-            },
-            "english": {
-                "af_bella": {
-                    "name": "US English (Female)",
-                    "gender": "female",
-                    "style": "academic",
-                    "recommended": True,
-                },
-                "am_michael": {
-                    "name": "US English (Male)",
-                    "gender": "male",
-                    "style": "academic",
-                    "recommended": False,
-                },
-                "bf_emma": {
-                    "name": "UK English (Female)",
-                    "gender": "female",
-                    "style": "narrative",
-                    "recommended": False,
-                },
-            },
-            "saudi": {
-                "af_saudi": {
-                    "name": "Saudi Arabic (Female)",
-                    "gender": "female",
-                    "style": "narrative",
-                    "recommended": False,
-                }
-            },
-        }
+    def __init__(self, config_path: Path | None = None) -> None:
+        self.catalog = VOICE_CATALOG
+        self.config_path = config_path or default_config_path()
+        self.preferences = self._load_preferences()
 
-    def get_catalog(self) -> dict:
-        """Return full voice catalog"""
-        result: dict[str, dict] = {}
-        for lang, voices in self.catalog.items():
-            result[lang] = {}
-            for vid, info in voices.items():
-                result[lang][vid] = {
-                    "id": vid,
-                    "name": info["name"],
-                    "language": lang,
-                    "gender": info["gender"],
-                    "style": info["style"],
-                    "recommended": info["recommended"],
-                }
-        return result
+    def get_catalog(self) -> dict[str, dict[str, str]]:
+        """Return the voice catalog: language -> voice id -> display name."""
+        return self.catalog
 
-    def get_voice_info(self, voice_id: str) -> dict | None:
-        for lang_voices in self.catalog.values():
-            if voice_id in lang_voices:
-                return {"id": voice_id, **lang_voices[voice_id]}
+    def language_for_voice(self, voice_id: str) -> str | None:
+        for language, voices in self.catalog.items():
+            if voice_id in voices:
+                return language
         return None
 
-    def get_voices_by_language(self, lang: str) -> list[VoiceInfo]:
-        voices = self.catalog.get(lang, {})
-        return [VoiceInfo(id=vid, language=lang, **info) for vid, info in voices.items()]
+    def get_default_voice(self, language: str) -> str:
+        voices = self.catalog.get(language)
+        if not voices:
+            raise ValueError(f"Unknown language: {language}")
+        saved = self.preferences.get(language)
+        if saved in voices:
+            return saved
+        return DEFAULT_VOICES.get(language) or next(iter(voices))
 
-    def get_recommended_voice(self, lang: str) -> str | None:
-        voices = self.catalog.get(lang, {})
-        for vid, info in voices.items():
-            if info.get("recommended"):
-                return vid
-        return next(iter(voices.keys())) if voices else None
+    def set_default_voice(self, language: str, voice_id: str) -> None:
+        voices = self.catalog.get(language)
+        if voices is None:
+            raise ValueError(f"Unknown language: {language}")
+        if voice_id not in voices:
+            raise ValueError(f"Unknown voice for {language}: {voice_id}")
+        self.preferences[language] = voice_id
+        self._save_preferences()
+
+    def get_preferences(self) -> dict[str, str]:
+        return dict(self.preferences)
+
+    def _load_preferences(self) -> dict[str, str]:
+        try:
+            data = json.loads(self.config_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Ignoring unreadable voice preferences: %s", self.config_path)
+            return {}
+
+        defaults = data.get("default_voices", {})
+        if not isinstance(defaults, dict):
+            return {}
+        return {
+            language: voice_id
+            for language, voice_id in defaults.items()
+            if language in self.catalog and voice_id in self.catalog[language]
+        }
+
+    def _save_preferences(self) -> None:
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"default_voices": self.preferences}
+        self.config_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

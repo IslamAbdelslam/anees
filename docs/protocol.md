@@ -73,15 +73,15 @@ reply to a notification.**
 | `lang.detect` | `{"text": str}` or `{"segments": [{"text": str, "page"?: int}]}` | `{"segments": [{"text": str, "page": int, "lang": "ar"\|"en"\|"mixed", "confidence": float, "needs_review": bool}]}` |
 | `arabic.add_tashkeel` | `{"text": str, "mode"?: "full"\|"semantic"\|"endings"}` | `TashkeelResult` |
 | `tts.synthesize` | `{"text": str, "lang": str, "voice": str, "speed"?: float}` | `{"audio_base64": str, "sample_rate": 24000, "duration": float}` |
-| `tts.list_voices` | — | voice catalog `{lang: {id: VoiceInfo}}` |
-| `tts.preview` | `{"voice": str, "lang"?: str}` | `{"audio_base64": str, "sample_rate": 24000}` |
+| `tts.list_voices` | — | voice catalog `{lang: {id: name}}` |
+| `tts.preview` | `{"voice"?: str, "voice_id"?: str, "lang"?: str}` | `{"audio_base64": str, "sample_rate": 24000}` |
 | `export.html` | `{"chunks": ChunkData[], "metadata": object, "options"?: object}` | `{"path": str}` |
 | `export.docx` | same as html | `{"path": str}` |
 | `models.ensure` | `{"models"?: str[]}` | `{"paths": {name: path}}` |
 | `job.start` | `{"job_id": str, "pdf_path": str, "language_mode"?: str, "voice"?: str, "output": str}` | `Job` |
 | `job.status` | `{"job_id": str}` | `Job` |
 
-Shared shapes (`ChunkData`, `TextSegment`, `PdfInfo`, `VoiceInfo`,
+Shared shapes (`ChunkData`, `TextSegment`, `PdfInfo`,
 `TashkeelResult`, `LanguageDetection`, `Job`) are defined once in
 `anees-core/src/models.rs` (Rust) and `python-backend/src/anees/models.py`
 (Python, pydantic v2); the two MUST stay field-compatible.
