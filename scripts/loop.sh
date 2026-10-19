@@ -177,7 +177,7 @@ select_next() {
       warn "$SELECT_REASON"; return 1
     fi
     if issue_is_escalated "$n"; then
-      log "skipping #$n (escalated, terminal this run)"; continue
+      warn "skipping #$n (escalated, terminal this run)"; continue
     fi
     printf '%s\n' "$n"; return 0
   done
