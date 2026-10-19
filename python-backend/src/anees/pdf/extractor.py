@@ -5,8 +5,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import fitz  # PyMuPDF
 import pdfplumber
+import pymupdf as fitz  # PyMuPDF
 
 from anees.models import ChunkData, PdfInfo, TextSegment
 from anees.pdf.chunker import CHUNK_SIZE

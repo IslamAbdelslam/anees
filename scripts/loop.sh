@@ -47,7 +47,7 @@ LANDED=0
 # Model continuity: when a lane's context window is exhausted (a run fails or a
 # fresh model is needed), rotate to the next-best free coding model. Ordered by
 # the coding-lane benchmarks researched in docs/loop-runbook.md.
-ROTATION_MODELS=(${ROTATION_MODELS:-opencode/beam-free opencode/big-pickle})
+ROTATION_MODELS=(${ROTATION_MODELS:-opencode/deepseek-v4.1-flash-free opencode/glm-5.3-flash-free opencode/nemotron-3-ultra-free})
 MAX_ROTATIONS="${MAX_ROTATIONS:-2}"
 CTX_ROTATE_PCT="${CTX_ROTATE_PCT:-95}"          # rotate before the window fills
 DEFAULT_CONTEXT_WINDOW="${DEFAULT_CONTEXT_WINDOW:-1000000}"

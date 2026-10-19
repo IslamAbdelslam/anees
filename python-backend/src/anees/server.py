@@ -298,7 +298,10 @@ async def main() -> None:
 
     async def send_error_response(req_id: Any, code: int, message: str) -> None:
         response = JSONRPCResponse(id=req_id, error={"code": code, "message": message})
-        writer.write((response.model_dump_json(exclude_none=True) + "\n").encode())
+        _payload = response.model_dump(exclude_none=True)
+        if "id" not in _payload:
+            _payload["id"] = response.id
+        writer.write((json.dumps(_payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
         await writer.drain()
 
     while True:
@@ -330,7 +333,10 @@ async def main() -> None:
                 )
                 continue
             response = await server.handle_request(request)
-            writer.write((response.model_dump_json(exclude_none=True) + "\n").encode())
+            _payload = response.model_dump(exclude_none=True)
+            if "id" not in _payload:
+                _payload["id"] = response.id
+            writer.write((json.dumps(_payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
             await writer.drain()
         elif "id" in data:
             # Explicit null id: has an id member so it is not a notification,
