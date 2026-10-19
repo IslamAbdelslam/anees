@@ -16,6 +16,9 @@ RELAY="/home/islam/.agents/skills/opencode-delegate/scripts/relay.mjs"
 STATE_DIR="$REPO_ROOT/.delegate"
 STATE_FILE="$STATE_DIR/loop-state.json"
 RUNS_DIR="$STATE_DIR/runs"
+HEARTBEAT_FILE="$STATE_DIR/heartbeat"
+LOCK_FILE="$STATE_DIR/loop.lock"
+GEMINI_USAGE_FILE="$STATE_DIR/gemini-usage.json"
 STOP_FILE="$STATE_DIR/STOP"
 CONFIG_FILE="$STATE_DIR/config.json"
 
@@ -40,6 +43,7 @@ ONLY_ONCE=0
 
 ORIG_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
 START_EPOCH=$(date +%s)
+trap 'warn "interrupted by signal; writing stop switch"; : > "$STOP_FILE"; exit 130' INT TERM HUP
 ENGINEER_RUNS=0
 REVIEWER_RUNS=0
 LANDED=0
@@ -49,6 +53,10 @@ LANDED=0
 # the coding-lane benchmarks researched in docs/loop-runbook.md.
 ROTATION_MODELS=(${ROTATION_MODELS:-opencode/deepseek-v4.1-flash-free opencode/glm-5.3-flash-free opencode/nemotron-3-ultra-free})
 MAX_ROTATIONS="${MAX_ROTATIONS:-2}"
+GEMINI_TOKEN_CAP="${GEMINI_TOKEN_CAP:-1000000}"
+GEMINI_ENGINEER_MODEL="${GEMINI_ENGINEER_MODEL:-gemini/gemini-2.5-flash}"
+GEMINI_REVIEWER_MODEL="${GEMINI_REVIEWER_MODEL:-gemini/gemini-2.5-pro}"
+declare -A MODEL_HEALTH MODEL_FAILS
 CTX_ROTATE_PCT="${CTX_ROTATE_PCT:-95}"          # rotate before the window fills
 DEFAULT_CONTEXT_WINDOW="${DEFAULT_CONTEXT_WINDOW:-1000000}"
 CUR_ENGINEER=""
@@ -57,6 +65,7 @@ CUR_REVIEWER=""
 log()  { printf '\033[1;36m[loop]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[loop]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[loop] FATAL:\033[0m %s\n' "$*" >&2; exit 1; }
+heartbeat() { date +%s > "$HEARTBEAT_FILE" 2>/dev/null || true; }
 
 usage() {
   sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
@@ -94,6 +103,7 @@ done
 
 [ -f "$RELAY" ] || die "relay.mjs not found at $RELAY"
 [ -f "$CONFIG_FILE" ] || die "lane config not found at $CONFIG_FILE (run delegate-setup first)"
+source "$SCRIPT_DIR/loop_lib.sh"
 command -v gh >/dev/null || die "gh CLI not found"
 command -v jq >/dev/null || die "jq not found"
 command -v node >/dev/null || die "node not found"
@@ -112,7 +122,10 @@ REVIEWER_MODEL="$(jq -r '.lanes.review.model // empty' "$CONFIG_FILE")"
 CUR_ENGINEER="$ENGINEER_MODEL"
 CUR_REVIEWER="$REVIEWER_MODEL"
 
-mkdir -p "$RUNS_DIR"
+mkdir -p "$STATE_DIR" "$RUNS_DIR"
+exec 9>"$LOCK_FILE"
+flock -n 9 || die "another loop instance is running (lock: $LOCK_FILE)"
+echo $$ > "$STATE_DIR/loop.pid"
 [ -f "$STATE_FILE" ] || printf '{"issues":{}}\n' > "$STATE_FILE"
 
 state_get() { jq -r --arg n "$1" --arg k "$2" '.issues[$n][$k] // empty' "$STATE_FILE" 2>/dev/null; }
@@ -210,12 +223,16 @@ advance_model() { # current other -> next rotation model that is not `other`
 run_engineer() { # brief outdir sessionfile -> 0 if a run completed
   local brief="$1" outdir="$2" sfile="$3" attempt=0
   while :; do
+    ensure_engineer_model
+    check_resources || { mark_model_bad "$CUR_ENGINEER"; return 1; }
     local -a a=(--brief "$brief" --lane build --model "$CUR_ENGINEER" --cd "$REPO_ROOT"
                  --timeout "$ENGINEER_TIMEOUT" --out-dir "$outdir")
     [ -s "$sfile" ] && a+=(--session "$(cat "$sfile")")
     node "$RELAY" "${a[@]}"
     ENGINEER_RUNS=$((ENGINEER_RUNS+1))
     if [ -f "$outdir/result.json" ] && [ "$(jq -r '.status // empty' "$outdir/result.json")" = "completed" ]; then
+      mark_model_ok "$CUR_ENGINEER"
+      case "$CUR_ENGINEER" in gemini/*) record_gemini_usage "$outdir/result.json" ;; esac
       jq -r '.sessionId // empty' "$outdir/result.json" > "$sfile"
       local pct
       if pct="$(ctx_pct "$outdir/result.json")" && [ -n "$pct" ] && [ "$pct" -ge "$CTX_ROTATE_PCT" ]; then
@@ -226,6 +243,7 @@ run_engineer() { # brief outdir sessionfile -> 0 if a run completed
       return 0
     fi
     [ "$attempt" -ge "$MAX_ROTATIONS" ] && return 1
+    mark_model_bad "$CUR_ENGINEER"
     warn "engineer run not completed; rotating model away from $CUR_ENGINEER (fresh context)"
     CUR_ENGINEER="$(advance_model "$CUR_ENGINEER" "$CUR_REVIEWER")"
     : > "$sfile"; attempt=$((attempt+1))
@@ -235,11 +253,14 @@ run_engineer() { # brief outdir sessionfile -> 0 if a run completed
 run_reviewer() { # brief outdir verdictout -> 0 if a parseable verdict was produced
   local brief="$1" outdir="$2" vout="$3" attempt=0
   while :; do
+    ensure_reviewer_model
     local -a a=(--brief "$brief" --lane review --model "$CUR_REVIEWER" --read-only
                 --cd "$REPO_ROOT" --timeout "$REVIEW_TIMEOUT" --out-dir "$outdir")
     node "$RELAY" "${a[@]}"
     REVIEWER_RUNS=$((REVIEWER_RUNS+1))
     if [ -f "$outdir/result.json" ] && extract_verdict "$outdir/result.json" "$vout"; then
+      mark_model_ok "$CUR_REVIEWER"
+      case "$CUR_REVIEWER" in gemini/*) record_gemini_usage "$outdir/result.json" ;; esac
       local pct
       if pct="$(ctx_pct "$outdir/result.json")" && [ -n "$pct" ] && [ "$pct" -ge "$CTX_ROTATE_PCT" ]; then
         warn "reviewer context at ${pct}% (>= ${CTX_ROTATE_PCT}%); next review uses another free model"
@@ -248,6 +269,7 @@ run_reviewer() { # brief outdir verdictout -> 0 if a parseable verdict was produ
       return 0
     fi
     [ "$attempt" -ge "$MAX_ROTATIONS" ] && return 1
+    mark_model_bad "$CUR_REVIEWER"
     warn "reviewer verdict unavailable; rotating model away from $CUR_REVIEWER"
     CUR_REVIEWER="$(advance_model "$CUR_REVIEWER" "$CUR_ENGINEER")"
     attempt=$((attempt+1))
@@ -500,13 +522,19 @@ work_issue() { # n -> 0 landed, 1 escalated
     # ---- commit + push + PR ----
     local msg; msg="$(jq -r '.finalMessage // ""' "$edir/result.json" | grep -o 'COMMIT_MSG:.*' | head -1 | sed 's/^COMMIT_MSG:[[:space:]]*//')"
     [ -n "$msg" ] || msg="chore(issue-$n): $title"
-    git -C "$REPO_ROOT" add -A
-    git -C "$REPO_ROOT" commit -q -m "$msg
+    # idempotent commit: skip if nothing changed since last commit
+    if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
+      git -C "$REPO_ROOT" add -A
+      git -C "$REPO_ROOT" commit -q -m "$msg
 
-Refs #$n"
-    if ! git -C "$REPO_ROOT" push -u origin "$branch" --quiet; then
-      escalate "$n" "$dir" "git push failed for branch $branch (refusing to review an unpushed head)"
-      return 1
+Refs #$n" || { escalate "$n" "$dir" "git commit failed"; return 1; }
+    fi
+    # push only if local is ahead of remote (or no upstream)
+    if ! git -C "$REPO_ROOT" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1 ||        [ "$(git -C "$REPO_ROOT" rev-parse HEAD)" != "$(git -C "$REPO_ROOT" rev-parse '@{u}' 2>/dev/null)" ]; then
+      if ! git -C "$REPO_ROOT" push -u origin "$branch" --quiet; then
+        escalate "$n" "$dir" "git push failed for branch $branch (refusing to review an unpushed head)"
+        return 1
+      fi
     fi
 
     local pr; pr="$(gh pr view "$branch" --repo "$REPO_SLUG" --json number --jq .number 2>/dev/null)"
@@ -592,10 +620,12 @@ issue_comment() {
 [ -z "$(git -C "$REPO_ROOT" status --porcelain)" ] || die "working tree dirty; commit or stash first"
 
 while :; do
+  heartbeat
   [ -f "$STOP_FILE" ] && { warn "STOP file present; halting"; break; }
   [ "$MAX_ISSUES" -gt 0 ] && [ "$LANDED" -ge "$MAX_ISSUES" ] && { log "max-issues ($MAX_ISSUES) reached"; break; }
   if [ $(( $(date +%s) - START_EPOCH )) -ge "$MAX_WALL_SECONDS" ]; then warn "wall-clock budget reached"; break; fi
   if [ "$ENGINEER_RUNS" -ge "$MAX_ENGINEER_RUNS" ]; then warn "engineer budget reached"; break; fi
+  check_resources || { warn "resource guard failed; pausing 60s"; sleep 60; continue; }
 
   if [ -n "$ONLY_ISSUE" ]; then
     N="$ONLY_ISSUE"; ONLY_ISSUE=""; ONLY_ONCE=1
