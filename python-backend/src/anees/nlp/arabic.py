@@ -1,7 +1,7 @@
 """Arabic text processing using camel-tools"""
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from camel_tools.disambig.mle import MLEDisambiguator
 from camel_tools.tokenizers.word import simple_word_tokenize
@@ -69,7 +69,7 @@ class ArabicProcessor:
             return TashkeelResult(text_with_diacritics=normalized, changes=0)
 
         replacements = [
-            self._render(disambig[index], token, mode)
+            self._render(disambig[index] if index < len(disambig) else None, token, mode)
             for index, token in enumerate(tokens)
         ]
         result = self._cleanup(self._rebuild(normalized, tokens, replacements))
@@ -82,26 +82,65 @@ class ArabicProcessor:
         """Normalize Arabic text"""
         text = normalize_unicode(text)
         text = normalize_alef_ar(text)
-        return normalize_teh_marbuta_ar(text)
+        return cast(str, normalize_teh_marbuta_ar(text))
 
     def _render(self, disambiguated: Any, token: str, mode: str) -> str:
-        analyses = getattr(disambiguated, "analyses", None)
+        analyses = self._analyses_of(disambiguated)
         if not analyses:
-            return token
+            # Fall back to a directly provided diacritized form if present.
+            diac = self._diac_of(disambiguated)
+            if diac is None:
+                return token
+            analyses = [disambiguated]
 
-        diac = analyses[0].diac
+        diac = self._diac_of(analyses[0])
+        if diac is None:
+            return token
         if mode == "full":
             return diac
         if mode == "semantic":
             return diac if self._is_homograph(analyses) else token
         if mode == "endings":
-            return dediac_ar(token) + self._ending(diac)
+            return cast(str, dediac_ar(token)) + self._ending(diac)
         return token
 
     def _is_homograph(self, analyses: list) -> bool:
         """True when analyses differ beyond their case ending."""
-        stems = {a.diac[: len(a.diac) - len(self._ending(a.diac))] for a in analyses}
+        stems = set()
+        for analysis in analyses:
+            diac = self._diac_of(analysis)
+            if diac is None:
+                continue
+            stems.add(diac[: len(diac) - len(self._ending(diac))])
         return len(stems) > 1
+
+    def _analyses_of(self, value: Any) -> list:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            analyses = value.get("analyses")
+        else:
+            analyses = getattr(value, "analyses", None)
+        if isinstance(analyses, (list, tuple)):
+            return list(analyses)
+        return []
+
+    def _diac_of(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in ("diac", "diacritized", "text", "word"):
+                candidate = value.get(key)
+                if isinstance(candidate, str):
+                    return candidate
+            return None
+        for attr in ("diac", "diacritized", "text", "word"):
+            candidate = getattr(value, attr, None)
+            if isinstance(candidate, str):
+                return candidate
+        return None
 
     def _ending(self, diac: str) -> str:
         """Trailing run of diacritics, i.e. the last letter's case ending."""
