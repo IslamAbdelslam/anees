@@ -301,7 +301,9 @@ async def main() -> None:
         _payload = response.model_dump(exclude_none=True)
         if "id" not in _payload:
             _payload["id"] = response.id
-        writer.write((json.dumps(_payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
+        writer.write(
+            (json.dumps(_payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        )
         await writer.drain()
 
     while True:
@@ -336,7 +338,9 @@ async def main() -> None:
             _payload = response.model_dump(exclude_none=True)
             if "id" not in _payload:
                 _payload["id"] = response.id
-            writer.write((json.dumps(_payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
+            writer.write(
+                (json.dumps(_payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+            )
             await writer.drain()
         elif "id" in data:
             # Explicit null id: has an id member so it is not a notification,
