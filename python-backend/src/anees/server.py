@@ -246,7 +246,7 @@ class AneesRPCServer:
         metadata = params.get("metadata", {})
         options = params.get("options", {})
         path = self.html_exporter.export(chunks, metadata, options)
-        return {"path": path}
+        return {"html_path": path}
 
     async def export_docx(self, params: dict) -> dict:
         chunks = params.get("chunks", [])

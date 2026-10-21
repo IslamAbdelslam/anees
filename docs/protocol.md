@@ -75,7 +75,7 @@ reply to a notification.**
 | `tts.synthesize` | `{"text": str, "lang": str, "voice": str, "speed"?: float}` | `{"audio_base64": str, "sample_rate": 24000, "duration": float}` |
 | `tts.list_voices` | — | voice catalog `{lang: {id: name}}` |
 | `tts.preview` | `{"voice"?: str, "voice_id"?: str, "lang"?: str}` | `{"audio_base64": str, "sample_rate": 24000}` |
-| `export.html` | `{"chunks": ChunkData[], "metadata": object, "options"?: object}` | `{"path": str}` |
+| `export.html` | `{"chunks": ChunkData[], "metadata": object, "options"?: object}` | `{"html_path": str}` |
 | `export.docx` | same as html | `{"path": str}` |
 | `models.ensure` | `{"models"?: str[]}` | `{"paths": {name: path}}` |
 | `job.start` | `{"job_id": str, "pdf_path": str, "language_mode"?: str, "voice"?: str, "output": str}` | `Job` |
