@@ -1,20 +1,20 @@
 """TTS Engine using ONNX Runtime"""
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import onnxruntime as ort
 
+from anees.tts.audio import CROSSFADE_MS, SAMPLE_RATE, Chapter, StitchedAudio
 from anees.tts.voices import VOICE_LANGUAGES
 
 logger = logging.getLogger("anees.tts")
 
-SAMPLE_RATE = 24000
 PREVIEW_SECONDS = 3.0
 STYLE_DIM = 256
-
 PREVIEW_TEXT = {
     "ar": "مرحباً بكم في أنيس",
     "ar_saudi": "مرحباً بكم في أنيس",
@@ -201,3 +201,76 @@ class TTSEngine:
         if audio.size >= samples:
             return audio[:samples]
         return np.pad(audio, (0, samples - audio.size))
+
+    def stitch(
+        self,
+        chunks: Sequence[np.ndarray],
+        titles: Sequence[str] | None = None,
+        crossfade_ms: int = CROSSFADE_MS,
+    ) -> StitchedAudio:
+        """Concatenate chunk audio with a crossfade, tracking chapter boundaries."""
+        return stitch_chunks(chunks, titles, crossfade_ms)
+
+
+def _join(parts: Sequence[np.ndarray], crossfade_ms: int) -> tuple[np.ndarray, list[int]]:
+    """Join audio parts with a crossfade; return the audio and each part's start."""
+    result = np.zeros(0, dtype=np.float32)
+    starts: list[int] = []
+
+    for part in parts:
+        audio = np.asarray(part, dtype=np.float32).reshape(-1)
+        if audio.size == 0:
+            continue
+        if result.size == 0:
+            result = audio
+            starts.append(0)
+            continue
+        samples = min(int(SAMPLE_RATE * crossfade_ms / 1000), result.size, audio.size)
+        if samples == 0:
+            starts.append(result.size)
+            result = np.concatenate([result, audio])
+            continue
+        fade_out = np.linspace(1.0, 0.0, samples, dtype=np.float32)
+        fade_in = np.linspace(0.0, 1.0, samples, dtype=np.float32)
+        starts.append(result.size - samples)
+        result = np.concatenate(
+            [
+                result[:-samples],
+                result[-samples:] * fade_out + audio[:samples] * fade_in,
+                audio[samples:],
+            ]
+        )
+    return result, starts
+
+
+def crossfade_concat(parts: Sequence[np.ndarray], crossfade_ms: int = CROSSFADE_MS) -> np.ndarray:
+    """Concatenate audio parts with a crossfade so the joins do not click."""
+    return _join(parts, crossfade_ms)[0]
+
+
+def stitch_chunks(
+    chunks: Sequence[np.ndarray],
+    titles: Sequence[str] | None = None,
+    crossfade_ms: int = CROSSFADE_MS,
+) -> StitchedAudio:
+    """Concatenate chunk audio arrays with a crossfade to avoid clicks.
+
+    Each chunk becomes one chapter; boundaries are reported in seconds so
+    they can be embedded as ID3 chapter markers.
+    """
+    names = list(titles) if titles is not None else []
+    kept = [
+        (index, chunk)
+        for index, chunk in enumerate(chunks)
+        if np.asarray(chunk, dtype=np.float32).size
+    ]
+    audio, starts = _join([chunk for _, chunk in kept], crossfade_ms)
+
+    chapters = []
+    for position, (index, _) in enumerate(kept):
+        start = starts[position]
+        end = starts[position + 1] if position + 1 < len(starts) else audio.size
+        title = names[index] if index < len(names) else f"Chapter {position + 1}"
+        chapters.append(Chapter(title=title, start=start / SAMPLE_RATE, end=end / SAMPLE_RATE))
+
+    return StitchedAudio(audio=audio, chapters=tuple(chapters))
