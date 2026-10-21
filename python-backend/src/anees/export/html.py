@@ -21,7 +21,8 @@ class HTMLExporter:
         self.template_dir.mkdir(exist_ok=True)
 
         template_file = self.template_dir / "document.html"
-        if not template_file.exists():
+        marker = "<!-- anees-template:v2 -->"
+        if not template_file.exists() or marker not in template_file.read_text(encoding="utf-8"):
             self._create_default_template(template_file)
 
         self.env = Environment(
@@ -32,7 +33,8 @@ class HTMLExporter:
         )
 
     def _create_default_template(self, path: Path) -> None:
-        template = """<!DOCTYPE html>
+        template = """<!-- anees-template:v2 -->
+<!DOCTYPE html>
 <html lang="{{ lang }}" dir="{{ 'rtl' if rtl else 'ltr' }}" data-theme="light">
 <head>
     <meta charset="UTF-8">
@@ -41,6 +43,8 @@ class HTMLExporter:
     <style>
         :root { --bg:#f8f9ff; --fg:#0b1c30; --card:#ffffff; --accent:#002741; --muted:#64748b; --border:#e2e8f0; }
         @media (prefers-color-scheme: dark) { :root { --bg:#0b1c30; --fg:#e2e8f0; --card:#1e293b; --accent:#93c5fd; --muted:#94a3b8; --border:#334155; } }
+        html[data-theme="dark"] { --bg: #0b1c30; --fg: #e2e8f0; --card: #1e293b; --accent: #93c5fd; --muted: #94a3b8; --border: #334155; }
+        html[data-theme="light"] { --bg: #f8f9ff; --fg: #0b1c30; --card: #ffffff; --accent: #002741; --muted: #64748b; --border: #e2e8f0; }
         * { box-sizing: border-box; }
         html { scroll-behavior: smooth; }
         body { font-family: 'IBM Plex Sans Arabic', 'Noto Sans Arabic', system-ui, sans-serif; line-height: 1.8; max-width: 900px; margin: 0 auto; padding: 2rem; background: var(--bg); color: var(--fg); direction: {{ 'rtl' if rtl else 'ltr' }}; }
@@ -54,7 +58,7 @@ class HTMLExporter:
         .segment.english { direction: ltr; text-align: left; }
         .segment.mixed { direction: rtl; text-align: justify; }
         .tashkeel { font-size: 1.1em; }
-        .low-confidence { border-bottom: 2px solid #b45309; background: bronze; cursor: help; }
+        .low-confidence { border-bottom: 2px solid #b45309; background: #cd7f32; cursor: help; /* bronze */ }
         .tashkeel-toggle, .theme-toggle { position: fixed; bottom: 1rem; z-index: 20; padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer; color: #fff; }
         .tashkeel-toggle { left: 1rem; background: #006a61; }
         .theme-toggle { right: 1rem; background: var(--accent); }
@@ -95,7 +99,7 @@ class HTMLExporter:
                 <h2 class="chapter-title">Pages {{ chunk.page_range[0] }}–{{ chunk.page_range[1] }}</h2>
                 <div class="page-marker">Pages {{ chunk.page_range[0] }}–{{ chunk.page_range[1] }}</div>
                 {% for segment in chunk.segments %}
-                <div class="segment {{ segment.lang }}{% if segment.confidence|default(1.0) < 0.8 %} low-confidence{% endif %}{% if include_tashkeel %} tashkeel{% endif %}" dir="{% if segment.lang in ['ar', 'mixed'] %}rtl{% else %}ltr{% endif %}" data-page="{{ segment.page }}" data-confidence="{{ segment.confidence|default(1.0) }}">
+                <div class="segment {{ segment.lang }}{% if segment.confidence|default(1.0) < 0.8 %} low-confidence{% endif %}{% if include_tashkeel %} tashkeel{% endif %}" dir="{% if segment.lang in ['ar', 'mixed'] %}rtl{% else %}ltr{% endif %}" data-text="{{ segment.text }}" data-page="{{ segment.page }}" data-confidence="{{ segment.confidence|default(1.0) }}">
                     {{ segment.text }}
                 </div>
                 {% endfor %}
@@ -110,10 +114,16 @@ class HTMLExporter:
     <script>
         document.addEventListener('DOMContentLoaded', function() {
             var tashkeelToggle = document.querySelector('.tashkeel-toggle');
+            var diacritics = /[\u064b-\u065f\u0670]/g;
+            function stripDiacritics(value) { return (value || '').replace(diacritics, ''); }
+            var showTashkeel = true;
             if (tashkeelToggle) {
                 tashkeelToggle.addEventListener('click', function() {
+                    showTashkeel = !showTashkeel;
                     document.querySelectorAll('.segment').forEach(function(seg) {
-                        seg.classList.toggle('tashkeel');
+                        var original = seg.getAttribute('data-text') || seg.textContent;
+                        seg.textContent = showTashkeel ? original : stripDiacritics(original);
+                        seg.classList.toggle('tashkeel', showTashkeel);
                     });
                 });
             }
@@ -146,8 +156,6 @@ class HTMLExporter:
             opts["tashkeel"] = bool(opts["include_tashkeel"])
         if "rtl" not in opts:
             opts["rtl"] = True
-        if "chapter_navigation" not in opts:
-            opts["chapter_navigation"] = True
         return opts
 
     def _audio_path(self, metadata: Any, options: Any) -> str | None:
@@ -187,11 +195,9 @@ class HTMLExporter:
         html = template.render(
             chunks=chunks,
             metadata=metadata,
-            options=opts,
             rtl=opts["rtl"],
             lang="ar" if opts["rtl"] else "en",
             include_tashkeel=opts["include_tashkeel"],
-            tashkeel=opts["include_tashkeel"],
             audio_path=self._audio_path(metadata, options),
             export_date=datetime.now().strftime("%Y-%m-%d %H:%M"),
         )
