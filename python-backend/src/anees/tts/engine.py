@@ -274,3 +274,6 @@ def stitch_chunks(
         chapters.append(Chapter(title=title, start=start / SAMPLE_RATE, end=end / SAMPLE_RATE))
 
     return StitchedAudio(audio=audio, chapters=tuple(chapters))
+
+
+stitch = stitch_chunks

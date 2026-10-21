@@ -37,7 +37,6 @@ class MP3Exporter:
         audio: np.ndarray,
         job_id: str,
         output_dir: Path,
-        *,
         title: str = ARTIST,
         album: str = ALBUM,
         artist: str = ARTIST,
@@ -88,7 +87,9 @@ class MP3Exporter:
         except FileNotFoundError as exc:
             raise RuntimeError("ffmpeg is required to export MP3") from exc
 
-        for line in process.stdout:
+        stdout = process.stdout
+        assert stdout is not None
+        for line in stdout:
             key, _, value = line.strip().partition("=")
             if key != "out_time_us" or duration <= 0:
                 continue
@@ -96,9 +97,13 @@ class MP3Exporter:
             if on_progress is not None:
                 on_progress(percent, f"Encoding MP3 ({percent}%)")
 
-        stderr = process.stderr.read()
+        stderr_stream = process.stderr
+        assert stderr_stream is not None
+        stderr = stderr_stream.read()
         if process.wait() != 0:
             raise RuntimeError(f"ffmpeg failed to encode MP3: {stderr.strip()[-500:]}")
+        if on_progress is not None:
+            on_progress(100, "Encoding MP3 (100%)")
 
     def _tag(
         self,

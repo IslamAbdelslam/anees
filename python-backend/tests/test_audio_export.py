@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,7 +21,7 @@ from anees.tts.audio import SAMPLE_RATE
 from anees.tts.engine import crossfade_concat, stitch_chunks
 
 
-def _tone(samples: int, freq: float = 440.0, amplitude: float = 0.5) -> "np.ndarray":
+def _tone(samples: int, freq: float = 440.0, amplitude: float = 0.5) -> Any:
     t = np.arange(samples) / SAMPLE_RATE
     return (amplitude * np.sin(2 * np.pi * freq * t)).astype(np.float32)
 
