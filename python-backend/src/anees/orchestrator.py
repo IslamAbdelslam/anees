@@ -94,6 +94,9 @@ class PipelineOrchestrator:
         except Exception:
             logger.exception("Progress callback failed")
 
+    async def _report_export_progress(self, percent: int, message: str) -> None:
+        await self._emit("exporting", percent, 100, message)
+
     def _state_path(self, job: Job) -> Path:
         return Path(job.output).with_suffix(".state.json")
 
@@ -238,44 +241,55 @@ class PipelineOrchestrator:
             self._update_progress(job, 0.95)
 
             import numpy as np
-            from scipy.io import wavfile
 
-            # Concatenate audio
-            combined = np.concatenate(all_audio)
+            from anees.export.mp3 import MP3Exporter
+            from anees.export.wav import write_wav
+            from anees.tts.engine import stitch_chunks
+
+            # Concatenate audio, one chapter per PDF chunk
+            chunk_audios = []
+            chapter_titles = []
+            index = 0
+            for chunk in all_chunks:
+                parts = []
+                for _ in chunk.segments:
+                    parts.append(all_audio[index])
+                    index += 1
+                chunk_audios.append(np.concatenate(parts) if parts else np.zeros(0, np.float32))
+                chapter_titles.append(f"Pages {chunk.page_range[0]}-{chunk.page_range[1]}")
+
+            stitched = stitch_chunks(chunk_audios, chapter_titles)
 
             # Save output
             output_path = Path(job.output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Save as WAV first
+            # Save as WAV first (archival copy)
             wav_path = output_path.with_suffix(".wav")
-            wavfile.write(str(wav_path), 24000, combined.astype(np.float32))
+            write_wav(wav_path, stitched.audio)
 
-            # Convert to MP3 using ffmpeg if available (off the event loop)
+            # Encode to MP3 (off the event loop)
             try:
-                import subprocess
+                exporter = MP3Exporter()
+                loop = asyncio.get_running_loop()
 
-                mp3_path = output_path.with_suffix(".mp3")
-                await asyncio.to_thread(
-                    subprocess.run,
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        str(wav_path),
-                        "-codec:a",
-                        "libmp3lame",
-                        "-b:a",
-                        "128k",
-                        str(mp3_path),
-                    ],
-                    check=True,
-                    capture_output=True,
+                def on_progress(percent: int, message: str) -> None:
+                    asyncio.run_coroutine_threadsafe(
+                        self._report_export_progress(percent, message), loop
+                    )
+
+                mp3_path = await asyncio.to_thread(
+                    exporter.export,
+                    stitched.audio,
+                    output_path.stem,
+                    output_path.parent,
+                    title=output_path.stem,
+                    chapters=stitched.chapters,
+                    on_progress=on_progress,
                 )
                 job.output_path = str(mp3_path)
-                wav_path.unlink()
             except Exception:
-                logger.exception("ffmpeg MP3 conversion failed; keeping WAV")
+                logger.exception("MP3 export failed; keeping WAV")
                 job.output_path = str(wav_path)
 
             if job.error:
